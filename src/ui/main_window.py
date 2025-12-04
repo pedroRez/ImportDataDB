@@ -31,9 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from importdatadb.core.mapping import MappingSelection
-from importdatadb.db.provider import ColumnInfo, DatabaseProvider
-from importdatadb.excel.reader import ExcelReader
+from core.mapping import MappingSelection
+from db.provider import ColumnInfo, DatabaseProvider
+from excel.reader import ExcelReader
 
 
 class MainWindow(QMainWindow):
