@@ -24,14 +24,23 @@ Projeto desktop em Python + Qt (PySide6) para importar planilhas Excel (XLSX) e 
    - Se for necessário suporte a outros bancos no futuro, adicionar os respectivos drivers (ex.: `pyodbc`, `pymysql`).
 
 ## Como usar (primeira execução sugerida)
-1. Clonar o repositório e entrar na pasta:
+1. Clonar o repositório e entrar na pasta (todos os comandos devem ser executados a partir da raiz do repositório, que contém `LICENSE`, `README.md`, `requirements.txt` e a pasta `src`):
    ```powershell
    git clone <URL-do-repositorio>
    cd ImportDataDB
    ```
 2. Ativar o ambiente virtual e instalar as dependências (passos acima).
 3. Configurar um banco PostgreSQL de teste e criar uma tabela exemplo para mapeamento.
-4. Rodar a aplicação (quando a UI estiver implementada, o entrypoint será algo como `python -m importdatadb.app`).
+4. Rodar a aplicação (quando a UI estiver implementada, o entrypoint será algo como `python -m importdatadb.app`). Como o código fonte fica agora em `src/importdatadb`, configure o `PYTHONPATH` para apontar para `src` (em PowerShell):
+   ```powershell
+   $env:PYTHONPATH = "${PWD}\src"
+   python -m importdatadb.app
+   ```
+   Em shells Unix-like, use:
+   ```bash
+   export PYTHONPATH="$(pwd)/src"
+   python -m importdatadb.app
+   ```
 5. Fluxo esperado na UI:
    - Escolher o arquivo Excel (.xlsx) e visualizar as abas.
    - Selecionar a aba e a tabela do banco.
