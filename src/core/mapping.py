@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from db.provider import ColumnInfo
+
+from src.db.provider import ColumnInfo
+
 
 
 @dataclass

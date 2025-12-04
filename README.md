@@ -31,14 +31,12 @@ Projeto desktop em Python + Qt (PySide6) para importar planilhas Excel (XLSX) e 
    ```
 2. Ativar o ambiente virtual e instalar as dependências (passos acima).
 3. Configurar um banco PostgreSQL de teste e criar uma tabela exemplo para mapeamento.
-4. Rodar a aplicação. O código-fonte agora fica diretamente em `src`, então basta apontar o `PYTHONPATH` para essa pasta e executar o módulo `app`:
+4. Rodar a aplicação. Agora basta executar o módulo `app` diretamente a partir da raiz do repositório:
    ```cmd
-   set PYTHONPATH=%CD%\src
    python -m app
    ```
    Em shells Unix-like, use:
    ```bash
-   export PYTHONPATH="$(pwd)/src"
    python -m app
    ```
 5. Fluxo esperado na UI:
