@@ -42,7 +42,7 @@ Projeto desktop em Python + Qt (PySide6) para importar planilhas Excel (XLSX) e 
    python -m app
    ```
 5. Fluxo esperado na UI:
-   - Escolher o arquivo Excel (.xlsx) e visualizar as abas.
+   - Escolher o arquivo Excel (.xlsx ou .xlsm) e visualizar as abas.
    - Selecionar a aba e a tabela do banco.
    - Indicar linha de cabeçalho e faixa de dados.
    - Mapear colunas da planilha ↔ colunas da tabela; definir se a PK é autoincrement.

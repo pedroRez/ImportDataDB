@@ -215,7 +215,9 @@ class MainWindow(QMainWindow):
 
     # Actions
     def _choose_excel(self) -> None:
-        file_name, _ = QFileDialog.getOpenFileName(self, "Selecione o arquivo Excel", str(Path.home()), "Planilhas (*.xlsx)")
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Selecione o arquivo Excel", str(Path.home()), "Planilhas (*.xlsx *.xlsm)"
+        )
         if not file_name:
             return
         self.excel_path_label.setText(file_name)
