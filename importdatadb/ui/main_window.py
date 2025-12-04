@@ -304,6 +304,14 @@ class MainWindow(QMainWindow):
         if not mapping:
             QMessageBox.warning(self, "Mapeamento", "Adicione ao menos um mapeamento de coluna")
             return None
+        join_column = self.join_combo.currentText() if self.update_radio.isChecked() else None
+        if join_column and join_column not in mapping.values():
+            QMessageBox.warning(
+                self,
+                "Mapeamento",
+                "Para UPDATE, a coluna de junção precisa estar mapeada para evitar falhas",
+            )
+            return None
         return MappingSelection(
             sheet_name=sheet_items[0].text(),
             table_name=table_items[0].text(),
@@ -312,7 +320,7 @@ class MainWindow(QMainWindow):
             end_row=self.end_row_spin.value() or None,
             column_mapping=mapping,
             operation="UPDATE" if self.update_radio.isChecked() else "INSERT",
-            join_column=self.join_combo.currentText() if self.update_radio.isChecked() else None,
+            join_column=join_column,
         )
 
     def _generate_preview(self) -> None:
