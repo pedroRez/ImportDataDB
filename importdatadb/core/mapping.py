@@ -16,6 +16,8 @@ class MappingSelection:
     column_mapping: Dict[str, str]
     operation: str
     join_column: Optional[str]
+    primary_key: Optional[str]
+    autogenerate_pk: bool
 
     def mapped_table_columns(self, columns: List[ColumnInfo]) -> List[str]:
         mapped = []
