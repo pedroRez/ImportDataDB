@@ -59,9 +59,21 @@ class ExcelReader:
         start_row: Optional[int] = None,
         end_row: Optional[int] = None,
     ) -> List[Dict[str, object]]:
-        preview = self.load_sheet_preview(sheet_name, header_row=header_row, start_row=start_row, end_row=end_row)
+        kwargs: Dict[str, object] = {"sheet_name": sheet_name}
+        if header_row is not None:
+            kwargs["header"] = header_row
+        else:
+            kwargs["header"] = 0
+        if start_row is not None:
+            kwargs["skiprows"] = max(start_row - 1, 0)
+        if end_row is not None:
+            kwargs["nrows"] = max(end_row - (kwargs.get("skiprows", 0) or 0), 0)
+
+        df = pd.read_excel(self.path, **kwargs)
+        df = df.dropna(how="all")
+
         records: List[Dict[str, object]] = []
-        for _, row in preview.sample.iterrows():
+        for _, row in df.iterrows():
             mapped_row = {db_col: row[sheet_col] for sheet_col, db_col in column_mapping.items() if sheet_col in row}
             records.append(mapped_row)
         return records
