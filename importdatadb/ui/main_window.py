@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self.database = DatabaseProvider()
         self.excel_reader: ExcelReader | None = None
         self.table_columns: List[ColumnInfo] = []
+        self.primary_key_column: str | None = None
 
         self._build_menu()
         self._build_layout()
@@ -174,6 +176,10 @@ class MainWindow(QMainWindow):
         self.mapping_table.setHorizontalHeaderLabels(["Coluna Excel", "Coluna Tabela"])
         layout.addWidget(self.mapping_table)
 
+        self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
+        self.pk_auto_checkbox.setEnabled(False)
+        layout.addWidget(self.pk_auto_checkbox)
+
         operation_layout = QHBoxLayout()
         self.insert_radio = QRadioButton("INSERT")
         self.insert_radio.setChecked(True)
@@ -269,13 +275,26 @@ class MainWindow(QMainWindow):
         self.columns_list.clear()
         self.table_columns_list.clear()
         self.join_combo.clear()
+        self.primary_key_column = None
         for col in self.table_columns:
             label = f"{col.name} ({col.type})"
             if col.primary_key:
                 label += " [PK]"
+                if not self.primary_key_column:
+                    self.primary_key_column = col.name
             self.columns_list.addItem(label)
             self.table_columns_list.addItem(col.name)
             self.join_combo.addItem(col.name)
+        if self.primary_key_column:
+            self.pk_auto_checkbox.setEnabled(True)
+            self.pk_auto_checkbox.setChecked(False)
+            self.pk_auto_checkbox.setText(
+                f"PK {self.primary_key_column} gerada pelo banco (auto-incremento)"
+            )
+        else:
+            self.pk_auto_checkbox.setEnabled(False)
+            self.pk_auto_checkbox.setChecked(False)
+            self.pk_auto_checkbox.setText("PK gerada pelo banco (auto-incremento)")
 
     def _add_mapping(self) -> None:
         sheet_items = self.sheet_columns_list.selectedItems()
@@ -312,6 +331,11 @@ class MainWindow(QMainWindow):
                 "Para UPDATE, a coluna de junção precisa estar mapeada para evitar falhas",
             )
             return None
+        autogenerate_pk = bool(
+            self.pk_auto_checkbox.isChecked()
+            and self.primary_key_column
+            and self.primary_key_column not in mapping.values()
+        )
         return MappingSelection(
             sheet_name=sheet_items[0].text(),
             table_name=table_items[0].text(),
@@ -321,6 +345,8 @@ class MainWindow(QMainWindow):
             column_mapping=mapping,
             operation="UPDATE" if self.update_radio.isChecked() else "INSERT",
             join_column=join_column,
+            primary_key=self.primary_key_column,
+            autogenerate_pk=autogenerate_pk,
         )
 
     def _generate_preview(self) -> None:
@@ -341,7 +367,11 @@ class MainWindow(QMainWindow):
             self._show_error("Erro ao pré-visualizar", exc)
 
     def _build_sql_example(self, selection: MappingSelection) -> str:
-        cols = list(selection.column_mapping.values())
+        cols = [
+            c
+            for c in selection.column_mapping.values()
+            if not (selection.autogenerate_pk and selection.primary_key == c)
+        ]
         if selection.operation == "INSERT":
             placeholders = ", ".join(f":{c}" for c in cols)
             return f"INSERT INTO {selection.table_name} ({', '.join(cols)}) VALUES ({placeholders});"
@@ -354,16 +384,33 @@ class MainWindow(QMainWindow):
         if not selection or not self.excel_reader:
             return
         try:
+            record_mapping = selection.column_mapping
+            if selection.autogenerate_pk and selection.primary_key:
+                record_mapping = {
+                    sheet_col: table_col
+                    for sheet_col, table_col in selection.column_mapping.items()
+                    if table_col != selection.primary_key
+                }
             records = self.excel_reader.read_records(
                 selection.sheet_name,
-                selection.column_mapping,
+                record_mapping,
                 header_row=selection.header_row,
                 start_row=selection.start_row,
                 end_row=selection.end_row,
             )
+            if selection.autogenerate_pk and selection.primary_key:
+                records = [
+                    {k: v for k, v in record.items() if k != selection.primary_key}
+                    for record in records
+                ]
             affected = 0
             if selection.operation == "INSERT":
-                affected = self.database.execute_insert(selection.table_name, records)
+                affected = self.database.execute_insert(
+                    selection.table_name,
+                    records,
+                    autogenerate_pk=selection.autogenerate_pk,
+                    primary_key=selection.primary_key,
+                )
             else:
                 if not selection.join_column:
                     QMessageBox.warning(self, "UPDATE", "Selecione uma coluna de junção")

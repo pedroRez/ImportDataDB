@@ -49,15 +49,27 @@ class DatabaseProvider:
             )
         return columns
 
-    def execute_insert(self, table: str, records: List[Dict[str, object]], schema: str = "public") -> int:
+    def execute_insert(
+        self,
+        table: str,
+        records: List[Dict[str, object]],
+        schema: str = "public",
+        autogenerate_pk: bool = False,
+        primary_key: Optional[str] = None,
+    ) -> int:
         if not self.engine or not records:
             return 0
+
+        records_to_use = records
+        if autogenerate_pk and primary_key:
+            records_to_use = [{k: v for k, v in record.items() if k != primary_key} for record in records]
+
         with self.engine.begin() as conn:
-            placeholders = ", ".join(f":{col}" for col in records[0].keys())
-            columns = ", ".join(records[0].keys())
+            placeholders = ", ".join(f":{col}" for col in records_to_use[0].keys())
+            columns = ", ".join(records_to_use[0].keys())
             stmt = text(f"INSERT INTO {schema}.{table} ({columns}) VALUES ({placeholders})")
-            conn.execute(stmt, records)
-        return len(records)
+            conn.execute(stmt, records_to_use)
+        return len(records_to_use)
 
     def execute_update(self, table: str, records: List[Dict[str, object]], join_column: str, schema: str = "public") -> int:
         if not self.engine or not records:
