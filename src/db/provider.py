@@ -13,6 +13,7 @@ class ColumnInfo:
     type: str
     nullable: bool
     primary_key: bool
+    max_length: Optional[int] = None
 
 
 class DatabaseProvider:
@@ -39,12 +40,15 @@ class DatabaseProvider:
         pk = set(inspector.get_pk_constraint(table_name, schema=schema).get("constrained_columns", []))
         columns = []
         for col in inspector.get_columns(table_name, schema=schema):
+            col_type = col.get("type")
+            max_length = getattr(col_type, "length", None)
             columns.append(
                 ColumnInfo(
                     name=col["name"],
-                    type=str(col.get("type", "")),
+                    type=str(col_type or ""),
                     nullable=bool(col.get("nullable", True)),
                     primary_key=col["name"] in pk,
+                    max_length=max_length,
                 )
             )
         return columns

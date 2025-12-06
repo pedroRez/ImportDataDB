@@ -13,9 +13,10 @@ class MappingSelection:
     sheet_name: str
     table_name: str
     header_row: int
-    start_row: Optional[int]
-    end_row: Optional[int]
+    start_column: Optional[int]
+    end_column: Optional[int]
     column_mapping: Dict[str, str]
+    default_values: Dict[str, object]
     operation: str
     join_column: Optional[str]
     primary_key: Optional[str]
