@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
-import warnings
 
 import pandas as pd
 
@@ -26,8 +24,7 @@ class ExcelReader:
         self._sheets_cache: Dict[str, SheetPreview] = {}
 
     def sheet_names(self) -> List[str]:
-        with self._suppress_openpyxl_print_area_warning():
-            return pd.ExcelFile(self.path).sheet_names
+        return pd.ExcelFile(self.path).sheet_names
 
     def load_sheet_preview(
         self, sheet_name: str, header_row: int | None = None, start_row: int | None = None, end_row: int | None = None
@@ -45,8 +42,7 @@ class ExcelReader:
         if end_row is not None:
             kwargs["nrows"] = max(end_row - (kwargs.get("skiprows", 0) or 0), 0)
 
-        with self._suppress_openpyxl_print_area_warning():
-            df = pd.read_excel(self.path, **kwargs)
+        df = pd.read_excel(self.path, **kwargs)
         df = df.dropna(how="all")  # remove empty rows
         columns = [str(col) for col in df.columns]
         preview = SheetPreview(name=sheet_name, columns=columns, sample=df.head(10))
@@ -73,8 +69,7 @@ class ExcelReader:
         if end_row is not None:
             kwargs["nrows"] = max(end_row - (kwargs.get("skiprows", 0) or 0), 0)
 
-        with self._suppress_openpyxl_print_area_warning():
-            df = pd.read_excel(self.path, **kwargs)
+        df = pd.read_excel(self.path, **kwargs)
         df = df.dropna(how="all")
 
         records: List[Dict[str, object]] = []
@@ -82,14 +77,3 @@ class ExcelReader:
             mapped_row = {db_col: row[sheet_col] for sheet_col, db_col in column_mapping.items() if sheet_col in row}
             records.append(mapped_row)
         return records
-
-    @contextmanager
-    def _suppress_openpyxl_print_area_warning(self):
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"Print area cannot be set to Defined name:.*",
-                category=UserWarning,
-                module="openpyxl.reader.workbook",
-            )
-            yield
