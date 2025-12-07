@@ -459,12 +459,12 @@ class MainWindow(QMainWindow):
         header_item = self.sheet_preview_table.verticalHeaderItem(min_row)
         if header_item is not None:
             try:
-                target_header = int(header_item.text())
+                excel_row = int(header_item.text())
             except ValueError:
-                target_header = getattr(self, "_current_header_excel_row_value", 1)
+                excel_row = self._excel_row_from_table_row(min_row)
         else:
-            first_data_row = getattr(self, "_current_first_data_row", 2)
-            target_header = first_data_row + min_row
+            excel_row = self._excel_row_from_table_row(min_row)
+        target_header = max(1, excel_row - 1)
         self.header_row_spin.setValue(target_header)
         self._refresh_sheet_preview()
 
@@ -474,16 +474,10 @@ class MainWindow(QMainWindow):
             self.selection_info_label.setText(self._selection_hint_text())
             self.selection_info_label.setToolTip("")
             return
-        first_data_row = getattr(self, "_current_first_data_row", 2)
-        header_row = getattr(self, "_current_header_excel_row_value", 1)
-
-        def row_to_excel(idx: int) -> int:
-            return first_data_row + idx
-
         min_row = min(r.topRow() for r in ranges)
         max_row = max(r.bottomRow() for r in ranges)
-        min_row_excel = row_to_excel(min_row)
-        max_row_excel = row_to_excel(max_row)
+        min_row_excel = self._excel_row_from_table_row(min_row)
+        max_row_excel = self._excel_row_from_table_row(max_row)
 
         cols = sorted({col for r in ranges for col in range(r.leftColumn(), r.rightColumn() + 1)})
         col_start_excel = self.col_start_spin.value()
@@ -513,6 +507,10 @@ class MainWindow(QMainWindow):
         return (
             "Selecione celulas na pre-visualizacao (Shift permite multiplas) e use os botoes acima para ajustar cabecalho e intervalo de colunas."
         )
+
+    def _excel_row_from_table_row(self, row_idx: int) -> int:
+        first_data_row = getattr(self, "_current_first_data_row", 2)
+        return first_data_row + row_idx
 
     def _set_default_input_widget(self, widget: QWidget) -> None:
         while self.default_value_layout.count():
