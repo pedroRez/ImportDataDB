@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -60,6 +61,13 @@ class MainWindow(QMainWindow):
         self._pre_validation_column: str | None = None
         self._pre_validation_last_result: tuple[int, int] | None = None
 
+        self.host_edit = QLineEdit("localhost")
+        self.port_edit = QLineEdit("5432")
+        self.db_edit = QLineEdit()
+        self.user_edit = QLineEdit()
+        self.pwd_edit = QLineEdit()
+        self.pwd_edit.setEchoMode(QLineEdit.Password)
+
         self._build_menu()
         self._build_layout()
 
@@ -74,19 +82,57 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central_layout = QVBoxLayout(central)
 
-        splitter = QSplitter(Qt.Horizontal)
+        tabs = QTabWidget()
+        tabs.addTab(self._build_excel_tab(), "Excel")
+        tabs.addTab(self._build_database_tab(), "Banco de Dados")
+        tabs.addTab(self._build_mapping_tab(), "Mapeamento")
 
-        splitter.addWidget(self._build_excel_panel())
-        splitter.addWidget(self._build_database_panel())
-        splitter.addWidget(self._build_mapping_panel())
-        splitter.addWidget(self._build_preview_panel())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setStretchFactor(2, 2)
-        splitter.setStretchFactor(3, 3)
-
-        central_layout.addWidget(splitter)
+        central_layout.addWidget(tabs)
         self.setCentralWidget(central)
+
+    def _build_excel_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(self._build_excel_panel())
+        return tab
+
+    def _build_database_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        connection_group = QGroupBox("Conexão")
+        connection_layout = QHBoxLayout(connection_group)
+        self.connection_btn = QPushButton("Conectar ao banco...")
+        self.connection_btn.clicked.connect(self._open_connection_dialog)
+        connection_layout.addWidget(self.connection_btn)
+
+        self.connection_status_label = QLabel("Não conectado")
+        self.connection_status_label.setWordWrap(True)
+        connection_layout.addWidget(self.connection_status_label, 1)
+        layout.addWidget(connection_group)
+
+        layout.addWidget(self._build_database_panel())
+        return tab
+
+    def _build_mapping_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+
+        main_splitter = QSplitter(Qt.Horizontal)
+
+        mapping_splitter = QSplitter(Qt.Vertical)
+        mapping_splitter.addWidget(self._build_mapping_panel())
+        mapping_splitter.addWidget(self._build_mapping_options_panel())
+        mapping_splitter.setStretchFactor(0, 2)
+        mapping_splitter.setStretchFactor(1, 3)
+
+        main_splitter.addWidget(mapping_splitter)
+        main_splitter.addWidget(self._build_preview_panel())
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(main_splitter)
+        return tab
 
     # Excel panel
     def _build_excel_panel(self) -> QWidget:
@@ -157,33 +203,8 @@ class MainWindow(QMainWindow):
 
     # Database panel
     def _build_database_panel(self) -> QWidget:
-        panel = QGroupBox("Banco de Dados")
+        panel = QGroupBox("Estrutura do Banco")
         layout = QVBoxLayout(panel)
-
-        grid = QGridLayout()
-        self.host_edit = QLineEdit("localhost")
-        self.port_edit = QLineEdit("5432")
-        self.db_edit = QLineEdit()
-        self.user_edit = QLineEdit()
-        self.pwd_edit = QLineEdit()
-        self.pwd_edit.setEchoMode(QLineEdit.Password)
-
-        grid.addWidget(QLabel("Host"), 0, 0)
-        grid.addWidget(self.host_edit, 0, 1)
-        grid.addWidget(QLabel("Porta"), 1, 0)
-        grid.addWidget(self.port_edit, 1, 1)
-        grid.addWidget(QLabel("Database"), 2, 0)
-        grid.addWidget(self.db_edit, 2, 1)
-        grid.addWidget(QLabel("Usuário"), 3, 0)
-        grid.addWidget(self.user_edit, 3, 1)
-        grid.addWidget(QLabel("Senha"), 4, 0)
-        grid.addWidget(self.pwd_edit, 4, 1)
-
-        layout.addLayout(grid)
-
-        self.connect_btn = QPushButton("Conectar")
-        self.connect_btn.clicked.connect(self._connect_db)
-        layout.addWidget(self.connect_btn)
 
         self.table_list = QListWidget()
         self.table_list.itemSelectionChanged.connect(self._on_table_selected)
@@ -223,6 +244,13 @@ class MainWindow(QMainWindow):
         self.required_columns_label = QLabel("Campos obrigatorios: --")
         self.required_columns_label.setWordWrap(True)
         layout.addWidget(self.required_columns_label)
+
+        return panel
+
+    def _build_mapping_options_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         defaults_group = QGroupBox("Valores padrao para colunas nao mapeadas")
         defaults_layout = QVBoxLayout(defaults_group)
@@ -396,7 +424,41 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao abrir Excel", exc)
 
-    def _connect_db(self) -> None:
+    def _open_connection_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Conectar ao banco")
+        layout = QVBoxLayout(dialog)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Host"), 0, 0)
+        grid.addWidget(self.host_edit, 0, 1)
+        grid.addWidget(QLabel("Porta"), 1, 0)
+        grid.addWidget(self.port_edit, 1, 1)
+        grid.addWidget(QLabel("Database"), 2, 0)
+        grid.addWidget(self.db_edit, 2, 1)
+        grid.addWidget(QLabel("Usuário"), 3, 0)
+        grid.addWidget(self.user_edit, 3, 1)
+        grid.addWidget(QLabel("Senha"), 4, 0)
+        grid.addWidget(self.pwd_edit, 4, 1)
+        layout.addLayout(grid)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        connect_btn = QPushButton("Conectar")
+        connect_btn.clicked.connect(lambda: self._connect_and_close(dialog))
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons.addWidget(connect_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
+        dialog.exec()
+
+    def _connect_and_close(self, dialog: QDialog) -> None:
+        if self._connect_db():
+            dialog.accept()
+
+    def _connect_db(self) -> bool:
         try:
             host = self.host_edit.text().strip()
             port = int(self.port_edit.text())
@@ -406,9 +468,14 @@ class MainWindow(QMainWindow):
             self.database.connect(host, port, database, user, pwd)
             self._foreign_columns_cache = {}
             self._load_tables()
+            connection_text = f"Conectado: {user or 'usuário'}@{host}:{port}/{database}"
+            self.connection_status_label.setText(connection_text)
             QMessageBox.information(self, "Banco", "Conexão realizada com sucesso")
+            return True
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao conectar", exc)
+            self.connection_status_label.setText("Erro ao conectar")
+            return False
 
     def _load_tables(self) -> None:
         self.table_list.clear()
