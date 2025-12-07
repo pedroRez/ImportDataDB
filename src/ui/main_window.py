@@ -213,13 +213,34 @@ class MainWindow(QMainWindow):
     def _build_mapping_panel(self) -> QWidget:
         panel = QGroupBox("Mapeamento")
         layout = QVBoxLayout(panel)
+        layout.setSpacing(12)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+
+        splitter.addWidget(self._build_mapping_section())
+        splitter.addWidget(self._build_defaults_and_fk_section())
+        splitter.addWidget(self._build_operations_section())
+
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(2, 1)
+
+        layout.addWidget(splitter)
+
+        return panel
+
+    def _build_mapping_section(self) -> QWidget:
+        section = QWidget()
+        section_layout = QVBoxLayout(section)
+        section_layout.setSpacing(10)
 
         lists_layout = QHBoxLayout()
         self.sheet_columns_list = QListWidget()
         self.table_columns_list = QListWidget()
         lists_layout.addWidget(self.sheet_columns_list)
         lists_layout.addWidget(self.table_columns_list)
-        layout.addLayout(lists_layout)
+        section_layout.addLayout(lists_layout)
 
         map_buttons = QHBoxLayout()
         self.add_mapping_btn = QPushButton("Mapear →")
@@ -228,15 +249,22 @@ class MainWindow(QMainWindow):
         self.remove_mapping_btn = QPushButton("Remover selecionado")
         self.remove_mapping_btn.clicked.connect(self._remove_mapping)
         map_buttons.addWidget(self.remove_mapping_btn)
-        layout.addLayout(map_buttons)
+        section_layout.addLayout(map_buttons)
 
         self.mapping_table = QTableWidget(0, 2)
         self.mapping_table.setHorizontalHeaderLabels(["Coluna Excel", "Coluna Tabela"])
-        layout.addWidget(self.mapping_table)
+        section_layout.addWidget(self.mapping_table)
 
         self.required_columns_label = QLabel("Campos obrigatorios: --")
         self.required_columns_label.setWordWrap(True)
-        layout.addWidget(self.required_columns_label)
+        section_layout.addWidget(self.required_columns_label)
+
+        return section
+
+    def _build_defaults_and_fk_section(self) -> QWidget:
+        section = QWidget()
+        section_layout = QVBoxLayout(section)
+        section_layout.setSpacing(12)
 
         defaults_group = QGroupBox("Valores padrao para colunas nao mapeadas")
         defaults_layout = QVBoxLayout(defaults_group)
@@ -280,7 +308,7 @@ class MainWindow(QMainWindow):
         self.remove_default_btn.clicked.connect(self._remove_default_value)
         defaults_layout.addWidget(self.remove_default_btn)
 
-        layout.addWidget(defaults_group)
+        section_layout.addWidget(defaults_group)
 
         fk_group = QGroupBox("Relacionamentos (FK por descrição)")
         fk_layout = QVBoxLayout(fk_group)
@@ -325,12 +353,18 @@ class MainWindow(QMainWindow):
         self.remove_fk_btn.clicked.connect(self._remove_fk_lookup)
         fk_layout.addWidget(self.remove_fk_btn)
 
-        layout.addWidget(fk_group)
+        section_layout.addWidget(fk_group)
+        return section
+
+    def _build_operations_section(self) -> QWidget:
+        section = QWidget()
+        section_layout = QVBoxLayout(section)
+        section_layout.setSpacing(10)
 
         self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
         self.pk_auto_checkbox.setEnabled(False)
         self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
-        layout.addWidget(self.pk_auto_checkbox)
+        section_layout.addWidget(self.pk_auto_checkbox)
 
         operation_layout = QHBoxLayout()
         self.insert_radio = QRadioButton("INSERT")
@@ -338,7 +372,7 @@ class MainWindow(QMainWindow):
         self.update_radio = QRadioButton("UPDATE")
         operation_layout.addWidget(self.insert_radio)
         operation_layout.addWidget(self.update_radio)
-        layout.addLayout(operation_layout)
+        section_layout.addLayout(operation_layout)
 
         join_layout = QHBoxLayout()
         join_layout.addWidget(QLabel("Coluna de junção (UPDATE)"))
@@ -347,7 +381,7 @@ class MainWindow(QMainWindow):
         self.join_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.join_combo.currentTextChanged.connect(lambda text: self._set_combo_tooltip(self.join_combo, text))
         join_layout.addWidget(self.join_combo)
-        layout.addLayout(join_layout)
+        section_layout.addLayout(join_layout)
 
         pre_validation_layout = QHBoxLayout()
         self.pre_validation_btn = QPushButton("Pré-validação...")
@@ -357,17 +391,17 @@ class MainWindow(QMainWindow):
         self.pre_validation_status.setWordWrap(True)
         pre_validation_layout.addWidget(self.pre_validation_status)
         pre_validation_layout.addStretch()
-        layout.addLayout(pre_validation_layout)
+        section_layout.addLayout(pre_validation_layout)
 
         self.generate_sql_btn = QPushButton("Gerar pré-visualização")
         self.generate_sql_btn.clicked.connect(self._generate_preview)
-        layout.addWidget(self.generate_sql_btn)
+        section_layout.addWidget(self.generate_sql_btn)
 
         self.execute_btn = QPushButton("Executar")
         self.execute_btn.clicked.connect(self._execute)
-        layout.addWidget(self.execute_btn)
+        section_layout.addWidget(self.execute_btn)
 
-        return panel
+        return section
 
     # Preview panel
     def _build_preview_panel(self) -> QWidget:
