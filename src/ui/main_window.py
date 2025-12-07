@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 
-from src.core.mapping import MappingSelection
+from src.core.mapping import ForeignKeyLookup, MappingSelection
 from src.db.provider import ColumnInfo, DatabaseProvider
 from src.excel.reader import ExcelReader, SheetPreview
 
@@ -54,6 +54,7 @@ class MainWindow(QMainWindow):
         self.table_columns: List[ColumnInfo] = []
         self.primary_key_column: str | None = None
         self._current_header_excel_row_value = 1
+        self._foreign_columns_cache: dict[str, List[ColumnInfo]] = {}
 
         self._build_menu()
         self._build_layout()
@@ -263,6 +264,51 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(defaults_group)
 
+        fk_group = QGroupBox("Relacionamentos (FK por descrição)")
+        fk_layout = QVBoxLayout(fk_group)
+
+        fk_row1 = QHBoxLayout()
+        fk_row1.addWidget(QLabel("Coluna FK na tabela"))
+        self.fk_target_combo = QComboBox()
+        fk_row1.addWidget(self.fk_target_combo)
+
+        fk_row1.addWidget(QLabel("Coluna Excel (descrição)"))
+        self.fk_excel_combo = QComboBox()
+        fk_row1.addWidget(self.fk_excel_combo)
+        fk_layout.addLayout(fk_row1)
+
+        fk_row2 = QHBoxLayout()
+        fk_row2.addWidget(QLabel("Tabela estrangeira"))
+        self.fk_table_combo = QComboBox()
+        self.fk_table_combo.currentTextChanged.connect(self._on_fk_table_changed)
+        fk_row2.addWidget(self.fk_table_combo)
+
+        fk_row2.addWidget(QLabel("Coluna ID"))
+        self.fk_id_combo = QComboBox()
+        fk_row2.addWidget(self.fk_id_combo)
+
+        fk_row2.addWidget(QLabel("Coluna descrição"))
+        self.fk_label_combo = QComboBox()
+        fk_row2.addWidget(self.fk_label_combo)
+        fk_layout.addLayout(fk_row2)
+
+        self.add_fk_btn = QPushButton("Adicionar relacionamento")
+        self.add_fk_btn.clicked.connect(self._add_fk_lookup)
+        fk_layout.addWidget(self.add_fk_btn)
+
+        self.fk_table = QTableWidget(0, 5)
+        self.fk_table.setHorizontalHeaderLabels(
+            ["Coluna Tabela", "Coluna Excel", "Tabela FK", "Coluna ID", "Coluna Descrição"]
+        )
+        self.fk_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        fk_layout.addWidget(self.fk_table)
+
+        self.remove_fk_btn = QPushButton("Remover relacionamento selecionado")
+        self.remove_fk_btn.clicked.connect(self._remove_fk_lookup)
+        fk_layout.addWidget(self.remove_fk_btn)
+
+        layout.addWidget(fk_group)
+
         self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
         self.pk_auto_checkbox.setEnabled(False)
         self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
@@ -331,6 +377,7 @@ class MainWindow(QMainWindow):
             self.sheet_preview_table.setColumnCount(0)
             self.selection_info_label.setText(self._selection_hint_text())
             self.sheet_columns_list.clear()
+            self._refresh_fk_excel_options()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao abrir Excel", exc)
 
@@ -342,6 +389,7 @@ class MainWindow(QMainWindow):
             user = self.user_edit.text().strip()
             pwd = self.pwd_edit.text()
             self.database.connect(host, port, database, user, pwd)
+            self._foreign_columns_cache = {}
             self._load_tables()
             QMessageBox.information(self, "Banco", "Conexão realizada com sucesso")
         except Exception as exc:  # noqa: BLE001
@@ -351,6 +399,7 @@ class MainWindow(QMainWindow):
         self.table_list.clear()
         for table in self.database.list_tables():
             self.table_list.addItem(table)
+        self._refresh_fk_table_options()
 
     def _on_sheet_selected(self) -> None:
         self._refresh_sheet_preview()
@@ -382,6 +431,7 @@ class MainWindow(QMainWindow):
             self.sheet_columns_list.clear()
             for col in preview.columns:
                 self.sheet_columns_list.addItem(col)
+            self._refresh_fk_excel_options()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao pre-visualizar", exc)
 
@@ -464,7 +514,7 @@ class MainWindow(QMainWindow):
                 excel_row = self._excel_row_from_table_row(min_row)
         else:
             excel_row = self._excel_row_from_table_row(min_row)
-        target_header = max(1, excel_row - 1)
+        target_header = max(1, excel_row)
         self.header_row_spin.setValue(target_header)
         self._refresh_sheet_preview()
 
@@ -511,6 +561,134 @@ class MainWindow(QMainWindow):
     def _excel_row_from_table_row(self, row_idx: int) -> int:
         first_data_row = getattr(self, "_current_first_data_row", 2)
         return first_data_row + row_idx
+
+    def _normalize_lookup_key(self, value: object) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            # pd.isna may not support the value type; ignore and continue.
+            pass
+        return str(value).strip().casefold()
+
+    def _current_fk_columns(self) -> set[str]:
+        cols: set[str] = set()
+        for row in range(self.fk_table.rowCount()):
+            item = self.fk_table.item(row, 0)
+            if item:
+                cols.add(item.text())
+        return cols
+
+    def _refresh_fk_target_options(self) -> None:
+        mapped = self._current_mapped_columns()
+        defaults = self._current_default_columns()
+        fks = self._current_fk_columns()
+        blocked = mapped | defaults | fks
+        if self.pk_auto_checkbox.isChecked() and self.primary_key_column:
+            blocked.add(self.primary_key_column)
+        available = [col for col in self.table_columns if col.name not in blocked]
+        self.fk_target_combo.clear()
+        for col in available:
+            label = f"{col.name} ({col.type})"
+            if not col.nullable:
+                label += " [Obrigatorio]"
+            self.fk_target_combo.addItem(label, col.name)
+        self.add_fk_btn.setEnabled(bool(available) and self.fk_excel_combo.count() > 0)
+
+    def _refresh_fk_excel_options(self) -> None:
+        self.fk_excel_combo.clear()
+        for idx in range(self.sheet_columns_list.count()):
+            item = self.sheet_columns_list.item(idx)
+            if item:
+                self.fk_excel_combo.addItem(item.text())
+        enable = self.fk_target_combo.count() > 0 and self.fk_excel_combo.count() > 0
+        self.add_fk_btn.setEnabled(enable)
+
+    def _refresh_fk_table_options(self) -> None:
+        tables = self.database.list_tables()
+        self.fk_table_combo.blockSignals(True)
+        self.fk_table_combo.clear()
+        for table in tables:
+            self.fk_table_combo.addItem(table)
+        self.fk_table_combo.blockSignals(False)
+        if tables:
+            self.fk_table_combo.setCurrentIndex(0)
+            self._on_fk_table_changed()
+        else:
+            self.fk_id_combo.clear()
+            self.fk_label_combo.clear()
+
+    def _on_fk_table_changed(self) -> None:
+        table = self.fk_table_combo.currentText()
+        self.fk_id_combo.clear()
+        self.fk_label_combo.clear()
+        if not table:
+            return
+        columns = self._foreign_columns_cache.get(table)
+        if columns is None:
+            columns = self.database.get_columns(table)
+            self._foreign_columns_cache[table] = columns
+        for col in columns:
+            label = f"{col.name} ({col.type})"
+            self.fk_id_combo.addItem(label, col.name)
+            self.fk_label_combo.addItem(label, col.name)
+
+    def _add_fk_lookup(self) -> None:
+        target = self.fk_target_combo.currentData()
+        excel_col = self.fk_excel_combo.currentText()
+        foreign_table = self.fk_table_combo.currentText()
+        foreign_id = self.fk_id_combo.currentData()
+        foreign_label = self.fk_label_combo.currentData()
+        if not target or not excel_col or not foreign_table or not foreign_id or not foreign_label:
+            QMessageBox.warning(self, "Relacionamento", "Selecione todos os campos para adicionar o relacionamento.")
+            return
+        if target in self._current_mapped_columns() or target in self._current_default_columns() or target in self._current_fk_columns():
+            QMessageBox.warning(self, "Relacionamento", "Coluna de tabela já utilizada no mapeamento, valor padrão ou outro relacionamento.")
+            return
+        row = self.fk_table.rowCount()
+        self.fk_table.insertRow(row)
+        self.fk_table.setItem(row, 0, QTableWidgetItem(target))
+        self.fk_table.setItem(row, 1, QTableWidgetItem(excel_col))
+        self.fk_table.setItem(row, 2, QTableWidgetItem(foreign_table))
+        self.fk_table.setItem(row, 3, QTableWidgetItem(foreign_id))
+        self.fk_table.setItem(row, 4, QTableWidgetItem(foreign_label))
+        self._refresh_fk_target_options()
+        self._refresh_default_column_options()
+        self._refresh_required_columns_hint()
+
+    def _remove_fk_lookup(self) -> None:
+        selection_model = self.fk_table.selectionModel()
+        if not selection_model:
+            return
+        rows = sorted({index.row() for index in selection_model.selectedRows()}, reverse=True)
+        for row in rows:
+            self.fk_table.removeRow(row)
+        self._refresh_fk_target_options()
+        self._refresh_default_column_options()
+        self._refresh_required_columns_hint()
+
+    def _collect_fk_lookups(self) -> List[ForeignKeyLookup]:
+        lookups: List[ForeignKeyLookup] = []
+        for row in range(self.fk_table.rowCount()):
+            target_item = self.fk_table.item(row, 0)
+            excel_item = self.fk_table.item(row, 1)
+            table_item = self.fk_table.item(row, 2)
+            id_item = self.fk_table.item(row, 3)
+            label_item = self.fk_table.item(row, 4)
+            if not target_item or not excel_item or not table_item or not id_item or not label_item:
+                continue
+            lookups.append(
+                ForeignKeyLookup(
+                    target_column=target_item.text(),
+                    excel_column=excel_item.text(),
+                    foreign_table=table_item.text(),
+                    foreign_id_column=id_item.text(),
+                    foreign_label_column=label_item.text(),
+                )
+            )
+        return lookups
 
     def _set_default_input_widget(self, widget: QWidget) -> None:
         while self.default_value_layout.count():
@@ -562,6 +740,7 @@ class MainWindow(QMainWindow):
             self._on_default_column_changed()
         else:
             self._set_default_input_widget(self.default_value_line)
+        self._refresh_fk_target_options()
         self._set_combo_tooltip(self.default_column_combo)
 
     def _on_default_column_changed(self) -> None:
@@ -583,8 +762,12 @@ class MainWindow(QMainWindow):
         column_name = self.default_column_combo.currentData()
         if not column_name:
             return
-        if column_name in self._current_mapped_columns() or column_name in self._current_default_columns():
-            QMessageBox.warning(self, "Valor padrao", "Coluna ja mapeada ou com valor padrao definido")
+        if (
+            column_name in self._current_mapped_columns()
+            or column_name in self._current_default_columns()
+            or column_name in self._current_fk_columns()
+        ):
+            QMessageBox.warning(self, "Valor padrao", "Coluna ja mapeada, com valor padrao ou relacionamento definido")
             return
         value, display = self._read_default_input(column_name)
         row = self.defaults_table.rowCount()
@@ -647,9 +830,15 @@ class MainWindow(QMainWindow):
         return values
 
     def _missing_required_columns(
-        self, mapping: Dict[str, str], defaults: Dict[str, object], autogenerate_pk: bool
+        self,
+        mapping_pairs: List[tuple[str, str]],
+        defaults: Dict[str, object],
+        autogenerate_pk: bool,
+        fk_lookups: List[ForeignKeyLookup],
     ) -> List[str]:
-        covered = set(mapping.values()) | set(defaults.keys())
+        covered = {table_col for _, table_col in mapping_pairs} | set(defaults.keys()) | {
+            fk.target_column for fk in fk_lookups
+        }
         missing = []
         for col in self.table_columns:
             if col.nullable:
@@ -680,7 +869,8 @@ class MainWindow(QMainWindow):
         ]
         mapping_cols = self._current_mapped_columns()
         default_cols = self._current_default_columns()
-        missing = [name for name in required if name not in mapping_cols and name not in default_cols]
+        fk_cols = self._current_fk_columns()
+        missing = [name for name in required if name not in mapping_cols and name not in default_cols and name not in fk_cols]
         if not required:
             self.required_columns_label.setText("Campos obrigatorios: nenhum")
             self.required_columns_label.setToolTip("")
@@ -710,6 +900,7 @@ class MainWindow(QMainWindow):
         self.join_combo.clear()
         self.mapping_table.setRowCount(0)
         self.defaults_table.setRowCount(0)
+        self.fk_table.setRowCount(0)
         self.primary_key_column = None
         for col in self.table_columns:
             label = f"{col.name} ({col.type})"
@@ -734,6 +925,7 @@ class MainWindow(QMainWindow):
             self.pk_auto_checkbox.setChecked(False)
             self.pk_auto_checkbox.setText("PK gerada pelo banco (auto-incremento)")
         self._refresh_default_column_options()
+        self._refresh_fk_target_options()
         self._refresh_required_columns_hint()
 
     def _add_mapping(self) -> None:
@@ -743,8 +935,12 @@ class MainWindow(QMainWindow):
             return
         sheet_col = sheet_items[0].text()
         table_col = table_items[0].text()
-        if table_col in self._current_mapped_columns() or table_col in self._current_default_columns():
-            QMessageBox.warning(self, "Mapeamento", "Coluna de tabela ja utilizada no mapeamento ou como valor padrao")
+        if (
+            table_col in self._current_mapped_columns()
+            or table_col in self._current_default_columns()
+            or table_col in self._current_fk_columns()
+        ):
+            QMessageBox.warning(self, "Mapeamento", "Coluna de tabela já utilizada no mapeamento, valor padrão ou relacionamento")
             return
         row = self.mapping_table.rowCount()
         self.mapping_table.insertRow(row)
@@ -778,32 +974,35 @@ class MainWindow(QMainWindow):
         if not sheet_items or not table_items:
             QMessageBox.warning(self, "Mapeamento", "Selecione uma aba e uma tabela")
             return None
-        mapping: Dict[str, str] = {}
+        mapping: List[tuple[str, str]] = []
         for row in range(self.mapping_table.rowCount()):
             sheet_col_item = self.mapping_table.item(row, 0)
             table_col_item = self.mapping_table.item(row, 1)
             if sheet_col_item and table_col_item:
-                mapping[sheet_col_item.text()] = table_col_item.text()
+                mapping.append((sheet_col_item.text(), table_col_item.text()))
         defaults = self._collect_default_values()
+        fk_lookups = self._collect_fk_lookups()
         join_column = self.join_combo.currentText() if self.update_radio.isChecked() else None
-        if join_column and join_column not in mapping.values():
+        mapping_targets = {table_col for _, table_col in mapping}
+        covered_join = mapping_targets | set(defaults.keys()) | {fk.target_column for fk in fk_lookups}
+        if join_column and join_column not in covered_join:
             QMessageBox.warning(
                 self,
                 "Mapeamento",
-                "Para UPDATE, a coluna de junção precisa estar mapeada para evitar falhas",
+                "Para UPDATE, a coluna de junção precisa estar mapeada/definida para evitar falhas",
             )
             return None
         autogenerate_pk = bool(
             self.pk_auto_checkbox.isChecked()
             and self.primary_key_column
-            and self.primary_key_column not in mapping.values()
+            and self.primary_key_column not in mapping_targets
         )
         if autogenerate_pk and self.primary_key_column:
             defaults.pop(self.primary_key_column, None)
-        if not mapping and not defaults:
+        if not mapping and not defaults and not fk_lookups:
             QMessageBox.warning(self, "Mapeamento", "Adicione ao menos um mapeamento ou valor padrão")
             return None
-        missing_required = self._missing_required_columns(mapping, defaults, autogenerate_pk)
+        missing_required = self._missing_required_columns(mapping, defaults, autogenerate_pk, fk_lookups)
         if missing_required:
             QMessageBox.warning(
                 self,
@@ -820,6 +1019,7 @@ class MainWindow(QMainWindow):
             end_column=self.col_end_spin.value() or None,
             column_mapping=mapping,
             default_values=defaults,
+            fk_lookups=fk_lookups,
             operation="UPDATE" if self.update_radio.isChecked() else "INSERT",
             join_column=join_column,
             primary_key=self.primary_key_column,
@@ -844,6 +1044,13 @@ class MainWindow(QMainWindow):
                 text.append("Valores padrão aplicados:")
                 for col, value in selection.default_values.items():
                     text.append(f"- {col}: {value}")
+            if selection.fk_lookups:
+                text.append("")
+                text.append("Relacionamentos (descrição -> ID):")
+                for fk in selection.fk_lookups:
+                    text.append(
+                        f"- {fk.target_column} <= {fk.foreign_table}.{fk.foreign_id_column} via {fk.foreign_label_column} = Excel[{fk.excel_column}]"
+                    )
             text.extend(["", "SQL estimado:", sql_example])
             self.preview_text.setPlainText("\n".join(text))
         except Exception as exc:  # noqa: BLE001
@@ -851,12 +1058,18 @@ class MainWindow(QMainWindow):
 
     def _build_sql_example(self, selection: MappingSelection) -> str:
         cols: List[str] = []
-        for c in selection.column_mapping.values():
+        for _, c in selection.column_mapping:
             if selection.autogenerate_pk and selection.primary_key == c:
                 continue
             if c not in cols:
                 cols.append(c)
         for c in selection.default_values.keys():
+            if selection.autogenerate_pk and selection.primary_key == c:
+                continue
+            if c not in cols:
+                cols.append(c)
+        for fk in selection.fk_lookups:
+            c = fk.target_column
             if selection.autogenerate_pk and selection.primary_key == c:
                 continue
             if c not in cols:
@@ -923,29 +1136,107 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, title: str, exc: Exception) -> None:
         traceback.print_exc()
-        QMessageBox.critical(self, title, f"{exc}\n\n{traceback.format_exc()}")
+        details = traceback.format_exc()
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle(title)
+        msg.setText(str(exc) if str(exc) else exc.__class__.__name__)
+        msg.setInformativeText("Clique em 'Mostrar detalhes' para ver a mensagem completa e copiar.")
+        msg.setDetailedText(details)
+        copy_btn = msg.addButton("Copiar detalhes", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Ok)
+        msg.setMinimumWidth(500)
+        msg.exec()
+        if msg.clickedButton() == copy_btn:
+            QApplication.clipboard().setText(details)
 
     def _build_records_for_selection(self, selection: MappingSelection) -> List[Dict[str, object]]:
-        record_mapping = selection.column_mapping
-        if selection.autogenerate_pk and selection.primary_key:
-            record_mapping = {
-                sheet_col: table_col
-                for sheet_col, table_col in selection.column_mapping.items()
-                if table_col != selection.primary_key
-            }
-        records = self.excel_reader.read_records(
+        # Carrega todas as colunas necessárias (mapeamento + lookups de FK)
+        df = self.excel_reader._read_dataframe(
             selection.sheet_name,
-            record_mapping,
-            header_row=selection.header_row,
-            start_row=None,
-            end_row=None,
+            selection.header_row,
+            data_start_row=None,
+            data_end_row=None,
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
+        column_mapping = selection.column_mapping
+        if selection.autogenerate_pk and selection.primary_key:
+            column_mapping = [(s, t) for s, t in selection.column_mapping if t != selection.primary_key]
+        needed_excel_cols = {s for s, _ in column_mapping} | {fk.excel_column for fk in selection.fk_lookups}
+        missing_excel = [col for col in needed_excel_cols if col not in df.columns]
+        if missing_excel:
+            raise ValueError(f"Colunas da planilha não encontradas: {', '.join(missing_excel)}")
+
+        records: List[Dict[str, object]] = []
+        for _, row in df.iterrows():
+            record: Dict[str, object] = {}
+            for sheet_col, table_col in column_mapping:
+                if sheet_col in row:
+                    record[table_col] = self.excel_reader._normalize_cell(row[sheet_col])
+            records.append(record)
+
+        # Aplica valores padrão
         if selection.default_values:
             for record in records:
                 for col, value in selection.default_values.items():
                     record.setdefault(col, value)
+
+        # Aplica lookups de FK (descrição -> ID)
+        if selection.fk_lookups:
+            lookup_cache: Dict[tuple[str, str, str], Dict[str, object]] = {}
+            for fk in selection.fk_lookups:
+                key = (fk.foreign_table, fk.foreign_id_column, fk.foreign_label_column)
+                if key not in lookup_cache:
+                    cache: Dict[str, object] = {}
+                    duplicates: List[str] = []
+                    for ident, label in self.database.fetch_lookup_values(
+                        fk.foreign_table, fk.foreign_id_column, fk.foreign_label_column
+                    ):
+                        normalized = self._normalize_lookup_key(label)
+                        if not normalized:
+                            continue
+                        existing = cache.get(normalized)
+                        if existing is None:
+                            cache[normalized] = ident
+                        elif existing != ident:
+                            duplicates.append(str(label))
+                    if duplicates:
+                        raise ValueError(
+                            f"Valores duplicados na tabela {fk.foreign_table} para a coluna de descrição "
+                            f"{fk.foreign_label_column}: {', '.join(sorted(set(duplicates)))}"
+                        )
+                    lookup_cache[key] = cache
+            unresolved: List[str] = []
+            first_excel_row = selection.header_row + 1
+            for idx, (_, row) in enumerate(df.iterrows()):
+                excel_row = first_excel_row + idx
+                for fk in selection.fk_lookups:
+                    raw_value = row.get(fk.excel_column)
+                    normalized = self._normalize_lookup_key(raw_value)
+                    if not normalized:
+                        unresolved.append(
+                            f"Linha {excel_row} coluna '{fk.excel_column}' vazia para preencher {fk.target_column}"
+                        )
+                        continue
+                    key = (fk.foreign_table, fk.foreign_id_column, fk.foreign_label_column)
+                    mapped = lookup_cache.get(key, {}).get(normalized)
+                    if mapped is None:
+                        preview = str(raw_value)
+                        unresolved.append(
+                            f"Linha {excel_row}: valor '{preview}' não encontrado em "
+                            f"{fk.foreign_table}.{fk.foreign_label_column} para preencher {fk.target_column}"
+                        )
+                    else:
+                        records[idx][fk.target_column] = mapped
+            if unresolved:
+                details = "\n".join(unresolved[:5])
+                remaining = len(unresolved) - len(unresolved[:5])
+                if remaining > 0:
+                    details += f"\n...mais {remaining} ocorrências sem correspondência."
+                raise ValueError("Não foi possível resolver os relacionamentos FK:\n" + details)
+
+        # Remove PK se marcada como auto-gerada
         if selection.autogenerate_pk and selection.primary_key:
             records = [{k: v for k, v in record.items() if k != selection.primary_key} for record in records]
         return records

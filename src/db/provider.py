@@ -83,3 +83,26 @@ class DatabaseProvider:
             stmt = text(f"UPDATE {schema}.{table} SET {set_clause} WHERE {join_column} = :{join_column}")
             conn.execute(stmt, records)
         return len(records)
+
+    def fetch_lookup_values(
+        self, table: str, id_column: str, label_column: str, schema: str = "public"
+    ) -> List[tuple[object, object]]:
+        if not self.engine:
+            return []
+        with self.engine.connect() as conn:
+            stmt = text(f"SELECT {id_column} AS id, {label_column} AS label FROM {schema}.{table}")
+            rows = conn.execute(stmt).all()
+        values: List[tuple[object, object]] = []
+        for row in rows:
+            if hasattr(row, "_mapping"):
+                mapping = row._mapping
+                id_value = mapping.get("id")
+                label_value = mapping.get("label")
+            elif isinstance(row, dict):
+                id_value = row.get("id")
+                label_value = row.get("label")
+            else:
+                id_value = row[0]
+                label_value = row[1] if len(row) > 1 else None
+            values.append((id_value, label_value))
+        return values
