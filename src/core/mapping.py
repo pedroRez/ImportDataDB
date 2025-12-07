@@ -30,6 +30,8 @@ class MappingSelection:
     primary_key: Optional[str]
     autogenerate_pk: bool
     fk_lookups: List[ForeignKeyLookup]
+    remove_duplicate_rows: bool
+    duplicate_check_column: Optional[str]
 
     def mapped_table_columns(self, columns: List[ColumnInfo]) -> List[str]:
         mapped: List[str] = []
