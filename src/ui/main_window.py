@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QHeaderView,
     QRadioButton,
     QSpinBox,
@@ -118,7 +119,7 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_mapping_panel())
         splitter.addWidget(self._build_preview_panel())
         splitter.setStretchFactor(0, 3)
@@ -215,18 +216,20 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(12)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
 
-        splitter.addWidget(self._build_mapping_section())
-        splitter.addWidget(self._build_defaults_and_fk_section())
-        splitter.addWidget(self._build_operations_section())
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(12)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setStretchFactor(2, 1)
+        content_layout.addWidget(self._build_mapping_section())
+        content_layout.addWidget(self._build_defaults_and_fk_section())
+        content_layout.addWidget(self._build_operations_section())
+        content_layout.addStretch()
 
-        layout.addWidget(splitter)
+        scroll_area.setWidget(content)
+        layout.addWidget(scroll_area)
 
         return panel
 
