@@ -890,6 +890,28 @@ class MainWindow(QMainWindow):
         self.required_columns_label.setText(text)
         self.required_columns_label.setToolTip("\n".join(tooltip_lines))
 
+    def _reset_after_execute(self) -> None:
+        self.mapping_table.setRowCount(0)
+        self.defaults_table.setRowCount(0)
+        self.fk_table.setRowCount(0)
+        self.preview_text.clear()
+        self.default_value_line.clear()
+        self.default_bool_combo.setCurrentIndex(0)
+        self.default_date_edit.setDate(QDate.currentDate())
+        self.pk_auto_checkbox.setChecked(False)
+        self.insert_radio.setChecked(True)
+        self.update_radio.setChecked(False)
+        self.sheet_columns_list.clearSelection()
+        self.table_columns_list.clearSelection()
+        self.mapping_table.clearSelection()
+        self.defaults_table.clearSelection()
+        self.fk_table.clearSelection()
+        if self.join_combo.count() > 0:
+            self.join_combo.setCurrentIndex(0)
+        self._refresh_default_column_options()
+        self._refresh_fk_target_options()
+        self._refresh_required_columns_hint()
+
     def _on_table_selected(self) -> None:
         items = self.table_list.selectedItems()
         if not items:
@@ -1132,6 +1154,7 @@ class MainWindow(QMainWindow):
                     return
                 affected = self.database.execute_update(selection.table_name, records, selection.join_column)
             QMessageBox.information(self, "Importação", f"Registros processados: {affected}")
+            self._reset_after_execute()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro na importação", exc)
 
