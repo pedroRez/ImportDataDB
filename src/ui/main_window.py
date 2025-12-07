@@ -216,6 +216,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.mapping_table)
 
         self.required_columns_label = QLabel("Campos obrigatorios: --")
+        self.required_columns_label.setWordWrap(True)
         layout.addWidget(self.required_columns_label)
 
         defaults_group = QGroupBox("Valores padrao para colunas nao mapeadas")
@@ -224,7 +225,12 @@ class MainWindow(QMainWindow):
         default_form = QHBoxLayout()
         default_form.addWidget(QLabel("Coluna tabela"))
         self.default_column_combo = QComboBox()
+        self.default_column_combo.setMinimumContentsLength(12)
+        self.default_column_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.default_column_combo.currentTextChanged.connect(self._on_default_column_changed)
+        self.default_column_combo.currentTextChanged.connect(
+            lambda text: self._set_combo_tooltip(self.default_column_combo, text)
+        )
         default_form.addWidget(self.default_column_combo)
 
         default_form.addWidget(QLabel("Valor padrao"))
@@ -273,6 +279,9 @@ class MainWindow(QMainWindow):
         join_layout = QHBoxLayout()
         join_layout.addWidget(QLabel("Coluna de junção (UPDATE)"))
         self.join_combo = QComboBox()
+        self.join_combo.setMinimumContentsLength(12)
+        self.join_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.join_combo.currentTextChanged.connect(lambda text: self._set_combo_tooltip(self.join_combo, text))
         join_layout.addWidget(self.join_combo)
         layout.addLayout(join_layout)
 
@@ -463,6 +472,7 @@ class MainWindow(QMainWindow):
         ranges = self.sheet_preview_table.selectedRanges()
         if not ranges:
             self.selection_info_label.setText(self._selection_hint_text())
+            self.selection_info_label.setToolTip("")
             return
         first_data_row = getattr(self, "_current_first_data_row", 2)
         header_row = getattr(self, "_current_header_excel_row_value", 1)
@@ -483,9 +493,13 @@ class MainWindow(QMainWindow):
             label = header_item.text() if header_item else str(col_start_excel + col)
             col_number = col_start_excel + col
             col_labels.append(f"{label} (col {col_number})")
-        self.selection_info_label.setText(
-            f"Linhas Excel: {min_row_excel} - {max_row_excel} | Colunas: {', '.join(col_labels)}"
+        col_brief = self._compact_columns_text(col_labels, limit=6)
+        text = (
+            f"Linhas Excel: {min_row_excel} - {max_row_excel} | "
+            f"Colunas ({len(col_labels)}): {col_brief}"
         )
+        self.selection_info_label.setText(text)
+        self.selection_info_label.setToolTip(", ".join(col_labels))
 
     def _current_header_excel_row(self) -> int:
         """Return header row in Excel (1-based), clamped to at least 1."""
@@ -507,6 +521,9 @@ class MainWindow(QMainWindow):
             if old:
                 old.setParent(None)
         self.default_value_layout.addWidget(widget)
+
+    def _set_combo_tooltip(self, combo: QComboBox, text: str | None = None) -> None:
+        combo.setToolTip(text if text is not None else combo.currentText())
 
     def _column_kind(self, column: ColumnInfo | None) -> str:
         if not column:
@@ -547,6 +564,7 @@ class MainWindow(QMainWindow):
             self._on_default_column_changed()
         else:
             self._set_default_input_widget(self.default_value_line)
+        self._set_combo_tooltip(self.default_column_combo)
 
     def _on_default_column_changed(self) -> None:
         column_name = self.default_column_combo.currentData()
@@ -561,6 +579,7 @@ class MainWindow(QMainWindow):
         else:
             self.default_value_line.clear()
             self._set_default_input_widget(self.default_value_line)
+        self._set_combo_tooltip(self.default_column_combo)
 
     def _add_default_value(self) -> None:
         column_name = self.default_column_combo.currentData()
@@ -643,9 +662,18 @@ class MainWindow(QMainWindow):
                 missing.append(col.name)
         return missing
 
+    def _compact_columns_text(self, columns: List[str], limit: int = 4) -> str:
+        if not columns:
+            return "--"
+        if len(columns) <= limit:
+            return ", ".join(columns)
+        remaining = len(columns) - limit
+        return f"{', '.join(columns[:limit])} +{remaining}"
+
     def _refresh_required_columns_hint(self) -> None:
         if not self.table_columns:
             self.required_columns_label.setText("Campos obrigatorios: --")
+            self.required_columns_label.setToolTip("")
             return
         required = [
             col.name
@@ -657,13 +685,21 @@ class MainWindow(QMainWindow):
         missing = [name for name in required if name not in mapping_cols and name not in default_cols]
         if not required:
             self.required_columns_label.setText("Campos obrigatorios: nenhum")
+            self.required_columns_label.setToolTip("")
             return
-        text = f"Campos obrigatorios: {', '.join(required)}"
+        required_brief = self._compact_columns_text(required)
+        tooltip_lines = [f"Obrigatorios ({len(required)}): {', '.join(required)}"]
         if missing:
-            text += f" | Faltando: {', '.join(missing)}"
+            missing_brief = self._compact_columns_text(missing)
+            text = (
+                f"Obrigatorios ({len(required)}): {required_brief} | "
+                f"Faltando ({len(missing)}): {missing_brief}"
+            )
+            tooltip_lines.append(f"Faltando ({len(missing)}): {', '.join(missing)}")
         else:
-            text += " | Todos atendidos"
+            text = f"Obrigatorios ({len(required)}): {required_brief} | Todos atendidos"
         self.required_columns_label.setText(text)
+        self.required_columns_label.setToolTip("\n".join(tooltip_lines))
 
     def _on_table_selected(self) -> None:
         items = self.table_list.selectedItems()
@@ -688,6 +724,7 @@ class MainWindow(QMainWindow):
             self.columns_list.addItem(label)
             self.table_columns_list.addItem(col.name)
             self.join_combo.addItem(col.name)
+        self._set_combo_tooltip(self.join_combo)
         if self.primary_key_column:
             self.pk_auto_checkbox.setEnabled(True)
             self.pk_auto_checkbox.setChecked(False)
