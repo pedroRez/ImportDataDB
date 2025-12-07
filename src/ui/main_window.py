@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -1137,18 +1138,33 @@ class MainWindow(QMainWindow):
     def _show_error(self, title: str, exc: Exception) -> None:
         traceback.print_exc()
         details = traceback.format_exc()
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Critical)
-        msg.setWindowTitle(title)
-        msg.setText(str(exc) if str(exc) else exc.__class__.__name__)
-        msg.setInformativeText("Clique em 'Mostrar detalhes' para ver a mensagem completa e copiar.")
-        msg.setDetailedText(details)
-        copy_btn = msg.addButton("Copiar detalhes", QMessageBox.ActionRole)
-        msg.addButton(QMessageBox.Ok)
-        msg.setMinimumWidth(500)
-        msg.exec()
-        if msg.clickedButton() == copy_btn:
-            QApplication.clipboard().setText(details)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(800, 500)
+
+        layout = QVBoxLayout(dialog)
+
+        msg_label = QLabel(str(exc) if str(exc) else exc.__class__.__name__)
+        msg_label.setWordWrap(True)
+        layout.addWidget(msg_label)
+
+        details_edit = QTextEdit()
+        details_edit.setReadOnly(True)
+        details_edit.setLineWrapMode(QTextEdit.NoWrap)
+        details_edit.setPlainText(details)
+        layout.addWidget(details_edit, 1)
+
+        buttons = QHBoxLayout()
+        copy_btn = QPushButton("Copiar detalhes")
+        close_btn = QPushButton("Fechar")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(details))
+        close_btn.clicked.connect(dialog.accept)
+        buttons.addWidget(copy_btn)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        dialog.exec()
 
     def _build_records_for_selection(self, selection: MappingSelection) -> List[Dict[str, object]]:
         # Carrega todas as colunas necessárias (mapeamento + lookups de FK)
