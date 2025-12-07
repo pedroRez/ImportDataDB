@@ -3,7 +3,7 @@ from __future__ import annotations
 import traceback
 from datetime import date
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from PySide6.QtCore import Qt, QDate
@@ -56,6 +56,9 @@ class MainWindow(QMainWindow):
         self.primary_key_column: str | None = None
         self._current_header_excel_row_value = 1
         self._foreign_columns_cache: dict[str, List[ColumnInfo]] = {}
+        self._pre_validation_remove_duplicates = False
+        self._pre_validation_column: str | None = None
+        self._pre_validation_last_result: tuple[int, int] | None = None
 
         self._build_menu()
         self._build_layout()
@@ -332,6 +335,16 @@ class MainWindow(QMainWindow):
         join_layout.addWidget(self.join_combo)
         layout.addLayout(join_layout)
 
+        pre_validation_layout = QHBoxLayout()
+        self.pre_validation_btn = QPushButton("Pré-validação...")
+        self.pre_validation_btn.clicked.connect(self._open_pre_validation)
+        pre_validation_layout.addWidget(self.pre_validation_btn)
+        self.pre_validation_status = QLabel("Pré-validação: sem regras")
+        self.pre_validation_status.setWordWrap(True)
+        pre_validation_layout.addWidget(self.pre_validation_status)
+        pre_validation_layout.addStretch()
+        layout.addLayout(pre_validation_layout)
+
         self.generate_sql_btn = QPushButton("Gerar pré-visualização")
         self.generate_sql_btn.clicked.connect(self._generate_preview)
         layout.addWidget(self.generate_sql_btn)
@@ -379,6 +392,7 @@ class MainWindow(QMainWindow):
             self.selection_info_label.setText(self._selection_hint_text())
             self.sheet_columns_list.clear()
             self._refresh_fk_excel_options()
+            self._clear_pre_validation_state()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao abrir Excel", exc)
 
@@ -403,6 +417,7 @@ class MainWindow(QMainWindow):
         self._refresh_fk_table_options()
 
     def _on_sheet_selected(self) -> None:
+        self._clear_pre_validation_state()
         self._refresh_sheet_preview()
 
     def _refresh_sheet_preview(self) -> None:
@@ -890,6 +905,29 @@ class MainWindow(QMainWindow):
         self.required_columns_label.setText(text)
         self.required_columns_label.setToolTip("\n".join(tooltip_lines))
 
+    def _clear_pre_validation_state(self) -> None:
+        self._pre_validation_remove_duplicates = False
+        self._pre_validation_column = None
+        self._pre_validation_last_result = None
+        self._refresh_pre_validation_hint()
+
+    def _refresh_pre_validation_hint(self) -> None:
+        if not getattr(self, "pre_validation_status", None):
+            return
+        if not (self._pre_validation_remove_duplicates and self._pre_validation_column):
+            self.pre_validation_status.setText("Pré-validação: sem regras")
+            self.pre_validation_status.setToolTip("")
+            return
+        text = f"Pré-validação: remover duplicados em '{self._pre_validation_column}'"
+        tooltip = text
+        if self._pre_validation_last_result:
+            total, unique = self._pre_validation_last_result
+            removed = max(total - unique, 0)
+            text += f" (previsto remover {removed}/{total})"
+            tooltip += f"\nTotal: {total} | Removidos: {removed} | Restantes: {unique}"
+        self.pre_validation_status.setText(text)
+        self.pre_validation_status.setToolTip(tooltip)
+
     def _reset_after_execute(self) -> None:
         self.mapping_table.setRowCount(0)
         self.defaults_table.setRowCount(0)
@@ -911,6 +949,7 @@ class MainWindow(QMainWindow):
         self._refresh_default_column_options()
         self._refresh_fk_target_options()
         self._refresh_required_columns_hint()
+        self._clear_pre_validation_state()
 
     def _on_table_selected(self) -> None:
         items = self.table_list.selectedItems()
@@ -1034,6 +1073,8 @@ class MainWindow(QMainWindow):
             )
             return None
         header_excel_row = self._current_header_excel_row()
+        remove_duplicates = self._pre_validation_remove_duplicates and bool(self._pre_validation_column)
+        duplicate_column = self._pre_validation_column if remove_duplicates else None
         return MappingSelection(
             sheet_name=sheet_items[0].text(),
             table_name=table_items[0].text(),
@@ -1047,7 +1088,58 @@ class MainWindow(QMainWindow):
             join_column=join_column,
             primary_key=self.primary_key_column,
             autogenerate_pk=autogenerate_pk,
+            remove_duplicate_rows=remove_duplicates,
+            duplicate_check_column=duplicate_column,
         )
+
+    def _current_sheet_columns(self) -> List[str]:
+        columns: List[str] = []
+        for idx in range(self.sheet_columns_list.count()):
+            item = self.sheet_columns_list.item(idx)
+            if item:
+                columns.append(item.text())
+        return columns
+
+    def _calculate_duplicate_stats(self, selection: MappingSelection, column: str) -> tuple[int, int]:
+        if not self.excel_reader:
+            raise ValueError("Nenhuma planilha carregada")
+        df = self.excel_reader._read_dataframe(
+            selection.sheet_name,
+            selection.header_row,
+            data_start_row=None,
+            data_end_row=None,
+            col_start=selection.start_column,
+            col_end=selection.end_column,
+        )
+        if column not in df.columns:
+            raise ValueError(f"Coluna '{column}' não encontrada na seleção atual")
+        df[column] = df[column].map(self.excel_reader._normalize_cell)
+        total_rows = len(df.index)
+        unique_rows = len(df.drop_duplicates(subset=[column], keep="first").index)
+        return total_rows, unique_rows
+
+    def _open_pre_validation(self) -> None:
+        selection = self._collect_mapping()
+        if not selection or not self.excel_reader:
+            return
+        columns = self._current_sheet_columns()
+        if not columns:
+            QMessageBox.warning(self, "Pré-validação", "Nenhuma coluna disponível para análise")
+            return
+
+        dialog = PreValidationDialog(
+            self,
+            columns=columns,
+            remove_duplicates=self._pre_validation_remove_duplicates,
+            selected_column=self._pre_validation_column,
+            last_result=self._pre_validation_last_result,
+            run_check=lambda col: self._calculate_duplicate_stats(selection, col),
+        )
+        if dialog.exec():
+            self._pre_validation_remove_duplicates = dialog.remove_duplicates
+            self._pre_validation_column = dialog.selected_column if dialog.remove_duplicates else None
+            self._pre_validation_last_result = dialog.last_result if dialog.remove_duplicates else None
+            self._refresh_pre_validation_hint()
 
     def _generate_preview(self) -> None:
         selection = self._collect_mapping()
@@ -1074,6 +1166,19 @@ class MainWindow(QMainWindow):
                     text.append(
                         f"- {fk.target_column} <= {fk.foreign_table}.{fk.foreign_id_column} via {fk.foreign_label_column} = Excel[{fk.excel_column}]"
                     )
+            if selection.remove_duplicate_rows and selection.duplicate_check_column:
+                text.append("")
+                duplicate_summary = "Remover duplicados em " + selection.duplicate_check_column
+                try:
+                    stats = self._calculate_duplicate_stats(selection, selection.duplicate_check_column)
+                    self._pre_validation_last_result = stats
+                except Exception:  # noqa: BLE001
+                    stats = self._pre_validation_last_result
+                if stats:
+                    total, unique = stats
+                    removed = max(total - unique, 0)
+                    duplicate_summary += f" (previsto remover {removed} de {total} linhas)"
+                text.append(duplicate_summary)
             text.extend(["", "SQL estimado:", sql_example])
             self.preview_text.setPlainText("\n".join(text))
         except Exception as exc:  # noqa: BLE001
@@ -1199,6 +1304,18 @@ class MainWindow(QMainWindow):
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
+        if selection.remove_duplicate_rows and selection.duplicate_check_column:
+            if selection.duplicate_check_column not in df.columns:
+                raise ValueError(
+                    f"Coluna '{selection.duplicate_check_column}' não encontrada para remover duplicados"
+                )
+            df[selection.duplicate_check_column] = df[selection.duplicate_check_column].map(
+                self.excel_reader._normalize_cell
+            )
+            total_rows = len(df.index)
+            df = df.drop_duplicates(subset=[selection.duplicate_check_column], keep="first")
+            df = df.reset_index(drop=True)
+            self._pre_validation_last_result = (total_rows, len(df.index))
         column_mapping = selection.column_mapping
         if selection.autogenerate_pk and selection.primary_key:
             column_mapping = [(s, t) for s, t in selection.column_mapping if t != selection.primary_key]
@@ -1317,6 +1434,106 @@ class MainWindow(QMainWindow):
         if isinstance(value, (date,)):
             return value.isoformat()
         return value
+
+
+class PreValidationDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        columns: List[str],
+        remove_duplicates: bool,
+        selected_column: Optional[str],
+        last_result: Optional[Tuple[int, int]],
+        run_check: Callable[[str], tuple[int, int]],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pré-validação")
+        self._run_check = run_check
+        self._last_result = last_result
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Configure verificações antes de importar os dados."))
+
+        self.remove_duplicates_checkbox = QCheckBox("Remover linhas com valores duplicados")
+        self.remove_duplicates_checkbox.setChecked(remove_duplicates)
+        layout.addWidget(self.remove_duplicates_checkbox)
+
+        column_layout = QHBoxLayout()
+        column_layout.addWidget(QLabel("Coluna para checar:"))
+        self.duplicate_column_combo = QComboBox()
+        for col in columns:
+            self.duplicate_column_combo.addItem(col)
+        if selected_column and selected_column in columns:
+            self.duplicate_column_combo.setCurrentText(selected_column)
+        column_layout.addWidget(self.duplicate_column_combo)
+        layout.addLayout(column_layout)
+
+        actions_layout = QHBoxLayout()
+        self.check_duplicates_btn = QPushButton("Checar duplicados")
+        self.check_duplicates_btn.clicked.connect(self._on_check_duplicates)
+        actions_layout.addWidget(self.check_duplicates_btn)
+        actions_layout.addStretch()
+        layout.addLayout(actions_layout)
+
+        self.summary_label = QLabel(
+            "Selecione uma coluna e clique em Checar duplicados para ver o impacto da limpeza."
+        )
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+        self.apply_btn = QPushButton("Aplicar")
+        self.apply_btn.clicked.connect(self._on_accept)
+        self.apply_btn.setEnabled(True)
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.clicked.connect(self.reject)
+        buttons_layout.addWidget(self.apply_btn)
+        buttons_layout.addWidget(cancel_btn)
+        layout.addLayout(buttons_layout)
+
+        if self._last_result:
+            self._update_summary_text(self._last_result)
+
+    @property
+    def remove_duplicates(self) -> bool:
+        return self.remove_duplicates_checkbox.isChecked()
+
+    @property
+    def selected_column(self) -> Optional[str]:
+        if self.duplicate_column_combo.count() == 0:
+            return None
+        return self.duplicate_column_combo.currentText()
+
+    @property
+    def last_result(self) -> Optional[Tuple[int, int]]:
+        return self._last_result if self.remove_duplicates else None
+
+    def _on_check_duplicates(self) -> None:
+        column = self.selected_column
+        if not column:
+            QMessageBox.warning(self, "Pré-validação", "Selecione uma coluna para checar duplicados")
+            return
+        try:
+            self._last_result = self._run_check(column)
+            self._update_summary_text(self._last_result)
+            self.apply_btn.setEnabled(True)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Pré-validação", str(exc))
+
+    def _update_summary_text(self, result: Tuple[int, int]) -> None:
+        total, unique = result
+        removed = max(total - unique, 0)
+        self.summary_label.setText(
+            f"Total de linhas: {total} | Duplicadas removíveis: {removed} | Restantes: {unique}"
+        )
+
+    def _on_accept(self) -> None:
+        if self.remove_duplicates and self._last_result is None:
+            QMessageBox.warning(self, "Pré-validação", "Execute a checagem antes de aplicar a remoção de duplicados")
+            return
+        self.accept()
 
 
 def main() -> int:
