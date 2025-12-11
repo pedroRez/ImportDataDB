@@ -30,6 +30,7 @@ class MappingSelection:
     primary_key: Optional[str]
     autogenerate_pk: bool
     fk_lookups: List[ForeignKeyLookup]
+    trim_whitespace: bool
     remove_duplicate_rows: bool
     duplicate_check_column: Optional[str]
 

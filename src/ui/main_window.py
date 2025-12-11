@@ -59,8 +59,10 @@ class MainWindow(QMainWindow):
         self._current_header_excel_row_value = 1
         self._foreign_columns_cache: dict[str, List[ColumnInfo]] = {}
         self._pre_validation_remove_duplicates = False
+        self._pre_validation_trim_whitespace = False
         self._pre_validation_column: str | None = None
         self._pre_validation_last_result: tuple[int, int] | None = None
+        self._fk_trim_whitespace = True
 
         self.host_edit = QLineEdit("localhost")
         self.port_edit = QLineEdit("5432")
@@ -340,6 +342,11 @@ class MainWindow(QMainWindow):
         self.fk_label_combo = QComboBox()
         fk_row2.addWidget(self.fk_label_combo)
         fk_layout.addLayout(fk_row2)
+
+        self.fk_trim_checkbox = QCheckBox("Remover espaços em branco no início/fim ao comparar (Excel vs banco)")
+        self.fk_trim_checkbox.setChecked(True)
+        self.fk_trim_checkbox.toggled.connect(lambda checked: setattr(self, "_fk_trim_whitespace", bool(checked)))
+        fk_layout.addWidget(self.fk_trim_checkbox)
 
         self.add_fk_btn = QPushButton("Adicionar relacionamento")
         self.add_fk_btn.clicked.connect(self._add_fk_lookup)
@@ -677,7 +684,23 @@ class MainWindow(QMainWindow):
         except Exception:
             # pd.isna may not support the value type; ignore and continue.
             pass
-        return str(value).strip().casefold()
+        text = str(value)
+        if self._fk_trim_whitespace:
+            text = text.strip()
+        return text.casefold()
+
+    def _trim_cell_whitespace(self, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    def _trim_dataframe_whitespace(self, df: pd.DataFrame, columns: Optional[List[str]] = None) -> pd.DataFrame:
+        target_columns = columns or list(df.columns)
+        for col in target_columns:
+            if col not in df.columns:
+                continue
+            df[col] = df[col].map(self._trim_cell_whitespace)
+        return df
 
     def _current_fk_columns(self) -> set[str]:
         cols: set[str] = set()
@@ -997,6 +1020,7 @@ class MainWindow(QMainWindow):
 
     def _clear_pre_validation_state(self) -> None:
         self._pre_validation_remove_duplicates = False
+        self._pre_validation_trim_whitespace = False
         self._pre_validation_column = None
         self._pre_validation_last_result = None
         self._refresh_pre_validation_hint()
@@ -1004,17 +1028,25 @@ class MainWindow(QMainWindow):
     def _refresh_pre_validation_hint(self) -> None:
         if not getattr(self, "pre_validation_status", None):
             return
-        if not (self._pre_validation_remove_duplicates and self._pre_validation_column):
+        rules: List[str] = []
+        tooltips: List[str] = []
+        if self._pre_validation_trim_whitespace:
+            rules.append("remover espacos extras")
+            tooltips.append("Remove espacos em branco no inicio/fim de valores textuais.")
+        if self._pre_validation_remove_duplicates and self._pre_validation_column:
+            rule = f"remover duplicados em '{self._pre_validation_column}' (ignora espacos no inicio/fim)"
+            rules.append(rule)
+            if self._pre_validation_last_result:
+                total, unique = self._pre_validation_last_result
+                removed = max(total - unique, 0)
+                rules[-1] += f" (previsto remover {removed}/{total})"
+                tooltips.append(f"Duplicados: Total {total} | Removidos {removed} | Restantes {unique}")
+        if not rules:
             self.pre_validation_status.setText("Pré-validação: sem regras")
             self.pre_validation_status.setToolTip("")
             return
-        text = f"Pré-validação: remover duplicados em '{self._pre_validation_column}'"
-        tooltip = text
-        if self._pre_validation_last_result:
-            total, unique = self._pre_validation_last_result
-            removed = max(total - unique, 0)
-            text += f" (previsto remover {removed}/{total})"
-            tooltip += f"\nTotal: {total} | Removidos: {removed} | Restantes: {unique}"
+        text = "Pré-validação: " + " | ".join(rules)
+        tooltip = "\n".join(tooltips) if tooltips else text
         self.pre_validation_status.setText(text)
         self.pre_validation_status.setToolTip(tooltip)
 
@@ -1178,6 +1210,7 @@ class MainWindow(QMainWindow):
             join_column=join_column,
             primary_key=self.primary_key_column,
             autogenerate_pk=autogenerate_pk,
+            trim_whitespace=self._pre_validation_trim_whitespace,
             remove_duplicate_rows=remove_duplicates,
             duplicate_check_column=duplicate_column,
         )
@@ -1203,6 +1236,8 @@ class MainWindow(QMainWindow):
         )
         if column not in df.columns:
             raise ValueError(f"Coluna '{column}' não encontrada na seleção atual")
+        # Sempre ignora espaços extras no cálculo de duplicados para não contar valores iguais como distintos.
+        df = self._trim_dataframe_whitespace(df, [column])
         df[column] = df[column].map(self.excel_reader._normalize_cell)
         total_rows = len(df.index)
         unique_rows = len(df.drop_duplicates(subset=[column], keep="first").index)
@@ -1221,12 +1256,14 @@ class MainWindow(QMainWindow):
             self,
             columns=columns,
             remove_duplicates=self._pre_validation_remove_duplicates,
+            trim_whitespace=self._pre_validation_trim_whitespace,
             selected_column=self._pre_validation_column,
             last_result=self._pre_validation_last_result,
             run_check=lambda col: self._calculate_duplicate_stats(selection, col),
         )
         if dialog.exec():
             self._pre_validation_remove_duplicates = dialog.remove_duplicates
+            self._pre_validation_trim_whitespace = dialog.trim_whitespace
             self._pre_validation_column = dialog.selected_column if dialog.remove_duplicates else None
             self._pre_validation_last_result = dialog.last_result if dialog.remove_duplicates else None
             self._refresh_pre_validation_hint()
@@ -1244,6 +1281,9 @@ class MainWindow(QMainWindow):
             )
             sql_example = self._build_sql_example(selection)
             text = ["Pré-visualização de dados:", preview.sample.head().to_string()]
+            if selection.trim_whitespace:
+                text.append("")
+                text.append("Limpeza: remover espacos em branco no inicio/fim das celulas de texto.")
             if selection.default_values:
                 text.append("")
                 text.append("Valores padrão aplicados:")
@@ -1258,7 +1298,11 @@ class MainWindow(QMainWindow):
                     )
             if selection.remove_duplicate_rows and selection.duplicate_check_column:
                 text.append("")
-                duplicate_summary = "Remover duplicados em " + selection.duplicate_check_column
+                duplicate_summary = (
+                    "Remover duplicados em "
+                    + selection.duplicate_check_column
+                    + " (ignora espaços no início/fim)"
+                )
                 try:
                     stats = self._calculate_duplicate_stats(selection, selection.duplicate_check_column)
                     self._pre_validation_last_result = stats
@@ -1394,10 +1438,16 @@ class MainWindow(QMainWindow):
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
+        if selection.trim_whitespace:
+            df = self._trim_dataframe_whitespace(df)
         if selection.remove_duplicate_rows and selection.duplicate_check_column:
             if selection.duplicate_check_column not in df.columns:
                 raise ValueError(
                     f"Coluna '{selection.duplicate_check_column}' não encontrada para remover duplicados"
+                )
+            if not selection.trim_whitespace:
+                df[selection.duplicate_check_column] = df[selection.duplicate_check_column].map(
+                    self._trim_cell_whitespace
                 )
             df[selection.duplicate_check_column] = df[selection.duplicate_check_column].map(
                 self.excel_reader._normalize_cell
@@ -1533,6 +1583,7 @@ class PreValidationDialog(QDialog):
         *,
         columns: List[str],
         remove_duplicates: bool,
+        trim_whitespace: bool,
         selected_column: Optional[str],
         last_result: Optional[Tuple[int, int]],
         run_check: Callable[[str], tuple[int, int]],
@@ -1548,6 +1599,9 @@ class PreValidationDialog(QDialog):
         self.remove_duplicates_checkbox = QCheckBox("Remover linhas com valores duplicados")
         self.remove_duplicates_checkbox.setChecked(remove_duplicates)
         layout.addWidget(self.remove_duplicates_checkbox)
+        self.trim_whitespace_checkbox = QCheckBox("Remover espacos em branco no inicio/fim das celulas")
+        self.trim_whitespace_checkbox.setChecked(trim_whitespace)
+        layout.addWidget(self.trim_whitespace_checkbox)
 
         column_layout = QHBoxLayout()
         column_layout.addWidget(QLabel("Coluna para checar:"))
@@ -1589,6 +1643,10 @@ class PreValidationDialog(QDialog):
     @property
     def remove_duplicates(self) -> bool:
         return self.remove_duplicates_checkbox.isChecked()
+
+    @property
+    def trim_whitespace(self) -> bool:
+        return self.trim_whitespace_checkbox.isChecked()
 
     @property
     def selected_column(self) -> Optional[str]:
