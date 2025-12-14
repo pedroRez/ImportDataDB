@@ -33,6 +33,11 @@ class MappingSelection:
     trim_whitespace: bool
     remove_duplicate_rows: bool
     duplicate_check_column: Optional[str]
+    similarity_replacements: Dict[str, Dict[str, str]]
+    split_column: Optional[str]
+    split_operator: Optional[str]
+    split_length: Optional[int]
+    split_extra_column: Optional[str]
 
     def mapped_table_columns(self, columns: List[ColumnInfo]) -> List[str]:
         mapped: List[str] = []

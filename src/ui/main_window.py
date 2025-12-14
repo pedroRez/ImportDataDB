@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import traceback
+from collections import Counter
 from datetime import date
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+import unicodedata
 
 import pandas as pd
 from PySide6.QtCore import Qt, QDate
@@ -29,6 +32,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QHeaderView,
     QRadioButton,
+    QProgressDialog,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -62,7 +66,22 @@ class MainWindow(QMainWindow):
         self._pre_validation_trim_whitespace = False
         self._pre_validation_column: str | None = None
         self._pre_validation_last_result: tuple[int, int] | None = None
+        self._split_enabled = False
+        self._split_column: str | None = None
+        self._split_operator: str = "gt"
+        self._split_length: int | None = None
+        self._split_extra_name: str | None = None
+        self._virtual_extra_columns: set[str] = set()
         self._fk_trim_whitespace = True
+        self._similarity_replacements: Dict[str, Dict[str, str]] = {}
+        self._cancel_requested = False
+        self._last_skipped_null_rows = 0
+        self.excel_file_path: Path | None = None
+        self._last_conversion_file: Path | None = None
+        self._relation_conversions: Dict[str, Dict[str, str]] = {}
+
+        self._excel_step_ready = False
+        self._db_step_ready = False
 
         self.host_edit = QLineEdit("localhost")
         self.port_edit = QLineEdit("5432")
@@ -85,18 +104,72 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central_layout = QVBoxLayout(central)
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_excel_tab(), "Excel")
-        tabs.addTab(self._build_database_tab(), "Banco de Dados")
-        tabs.addTab(self._build_mapping_tab(), "Mapeamento")
+        self.step_header_label = QLabel()
+        self.step_hint_label = QLabel()
+        self.step_hint_label.setWordWrap(True)
+        central_layout.addWidget(self.step_header_label)
+        central_layout.addWidget(self.step_hint_label)
 
-        central_layout.addWidget(tabs)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_excel_tab(), "Step 1 - Excel")
+        self.tabs.addTab(self._build_database_tab(), "Step 2 - Banco de Dados")
+        self.tabs.addTab(self._build_mapping_tab(), "Step 3 - Mapeamento")
+
+        central_layout.addWidget(self.tabs)
         self.setCentralWidget(central)
+        self._update_step_progress()
+
+    def _update_step_progress(self) -> None:
+        step1 = f"{'[x]' if self._excel_step_ready else '[ ]'} Step 1 - Excel"
+        step2 = f"{'[x]' if self._db_step_ready else '[ ]'} Step 2 - Banco de Dados"
+        step3 = "[ ] Step 3 - Mapeamento"
+        self.step_header_label.setText("  >  ".join([step1, step2, step3]))
+
+        if not self._excel_step_ready:
+            hint = "Step 1: importe o Excel e selecione uma aba para liberar o proximo passo."
+        elif not self._db_step_ready:
+            hint = "Step 2: va para Banco de Dados, conecte e escolha a tabela; depois siga para o mapeamento."
+        else:
+            hint = "Step 3: finalize o mapeamento, gere a pre-visualizacao ou execute a importacao."
+        self.step_hint_label.setText(hint)
+
+        if getattr(self, "excel_next_btn", None):
+            self.excel_next_btn.setEnabled(self._excel_step_ready)
+        if getattr(self, "db_next_btn", None):
+            self.db_next_btn.setEnabled(self._db_step_ready)
+        if getattr(self, "excel_step_hint", None):
+            if self._excel_step_ready:
+                self.excel_step_hint.setText("Aba selecionada. Clique em Proximo para ir para Banco de Dados (Step 2).")
+            else:
+                self.excel_step_hint.setText("Escolha o arquivo e a aba do Excel para habilitar o proximo passo.")
+        if getattr(self, "db_step_hint", None):
+            if self._db_step_ready:
+                self.db_step_hint.setText("Tabela selecionada. Clique em Proximo para seguir para o mapeamento (Step 3).")
+            else:
+                self.db_step_hint.setText("Conecte no banco e selecione uma tabela para habilitar o proximo passo.")
+
+    def _set_excel_step_ready(self, ready: bool) -> None:
+        self._excel_step_ready = ready
+        self._update_step_progress()
+
+    def _set_db_step_ready(self, ready: bool) -> None:
+        self._db_step_ready = ready
+        self._update_step_progress()
 
     def _build_excel_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.addWidget(self._build_excel_panel())
+
+        excel_controls = QHBoxLayout()
+        self.excel_step_hint = QLabel("Importe o Excel e selecione uma aba para seguir para o banco de dados.")
+        self.excel_step_hint.setWordWrap(True)
+        excel_controls.addWidget(self.excel_step_hint, 1)
+        self.excel_next_btn = QPushButton("Proximo: Banco de Dados")
+        self.excel_next_btn.setEnabled(False)
+        self.excel_next_btn.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        excel_controls.addWidget(self.excel_next_btn)
+        layout.addLayout(excel_controls)
         return tab
 
     def _build_database_tab(self) -> QWidget:
@@ -115,6 +188,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(connection_group)
 
         layout.addWidget(self._build_database_panel())
+
+        db_controls = QHBoxLayout()
+        self.db_step_hint = QLabel("Conecte e escolha a tabela para seguir ao mapeamento.")
+        self.db_step_hint.setWordWrap(True)
+        db_controls.addWidget(self.db_step_hint, 1)
+        self.db_next_btn = QPushButton("Proximo: Mapeamento")
+        self.db_next_btn.setEnabled(False)
+        self.db_next_btn.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
+        db_controls.addWidget(self.db_next_btn)
+        layout.addLayout(db_controls)
         return tab
 
     def _build_mapping_tab(self) -> QWidget:
@@ -264,6 +347,11 @@ class MainWindow(QMainWindow):
         self.required_columns_label.setWordWrap(True)
         section_layout.addWidget(self.required_columns_label)
 
+        self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
+        self.pk_auto_checkbox.setEnabled(False)
+        self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
+        section_layout.addWidget(self.pk_auto_checkbox)
+
         return section
 
     def _build_defaults_and_fk_section(self) -> QWidget:
@@ -363,6 +451,15 @@ class MainWindow(QMainWindow):
         self.remove_fk_btn.clicked.connect(self._remove_fk_lookup)
         fk_layout.addWidget(self.remove_fk_btn)
 
+        conversion_layout = QHBoxLayout()
+        self.fk_conversion_btn = QPushButton("Importar arquivo de conversões (FK)")
+        self.fk_conversion_btn.clicked.connect(self._load_fk_conversion_file)
+        conversion_layout.addWidget(self.fk_conversion_btn)
+        self.fk_conversion_status = QLabel("Sem conversões carregadas")
+        self.fk_conversion_status.setWordWrap(True)
+        conversion_layout.addWidget(self.fk_conversion_status, 1)
+        fk_layout.addLayout(conversion_layout)
+
         section_layout.addWidget(fk_group)
         return section
 
@@ -370,11 +467,6 @@ class MainWindow(QMainWindow):
         section = QWidget()
         section_layout = QVBoxLayout(section)
         section_layout.setSpacing(10)
-
-        self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
-        self.pk_auto_checkbox.setEnabled(False)
-        self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
-        section_layout.addWidget(self.pk_auto_checkbox)
 
         operation_layout = QHBoxLayout()
         self.insert_radio = QRadioButton("INSERT")
@@ -402,6 +494,24 @@ class MainWindow(QMainWindow):
         pre_validation_layout.addWidget(self.pre_validation_status)
         pre_validation_layout.addStretch()
         section_layout.addLayout(pre_validation_layout)
+
+        similarity_layout = QHBoxLayout()
+        self.similarity_btn = QPushButton("Verificar palavras parecidas...")
+        self.similarity_btn.clicked.connect(self._open_similarity_validation)
+        similarity_layout.addWidget(self.similarity_btn)
+        self.similarity_status = QLabel("Padronização: inativa")
+        self.similarity_status.setWordWrap(True)
+        similarity_layout.addWidget(self.similarity_status, 1)
+        similarity_layout.addStretch()
+        section_layout.addLayout(similarity_layout)
+
+        conversion_layout = QHBoxLayout()
+        self.export_conversion_btn = QPushButton("Gerar arquivo de conversões")
+        self.export_conversion_btn.setEnabled(False)
+        self.export_conversion_btn.clicked.connect(self._export_similarity_file_action)
+        conversion_layout.addWidget(self.export_conversion_btn)
+        conversion_layout.addStretch()
+        section_layout.addLayout(conversion_layout)
 
         self.generate_sql_btn = QPushButton("Gerar pré-visualização")
         self.generate_sql_btn.clicked.connect(self._generate_preview)
@@ -439,11 +549,15 @@ class MainWindow(QMainWindow):
         if not file_name:
             return
         self.excel_path_label.setText(file_name)
+        self.excel_file_path = Path(file_name)
         try:
             self.excel_reader = ExcelReader(file_name)
+            self._relation_conversions = {}
+            self._refresh_fk_conversion_hint()
             self.sheet_list.clear()
             for name in self.excel_reader.sheet_names():
                 self.sheet_list.addItem(name)
+            self._set_excel_step_ready(False)
             self.sheet_preview_table.clear()
             self.sheet_preview_table.setRowCount(0)
             self.sheet_preview_table.setColumnCount(0)
@@ -505,19 +619,26 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao conectar", exc)
             self.connection_status_label.setText("Erro ao conectar")
+            self._set_db_step_ready(False)
             return False
 
     def _load_tables(self) -> None:
         self.table_list.clear()
+        self._set_db_step_ready(False)
         for table in self.database.list_tables():
             self.table_list.addItem(table)
         self._refresh_fk_table_options()
 
     def _on_sheet_selected(self) -> None:
+        items = self.sheet_list.selectedItems()
+        if not items:
+            self._set_excel_step_ready(False)
+            return
         self._clear_pre_validation_state()
         self._refresh_sheet_preview()
 
     def _refresh_sheet_preview(self) -> None:
+        self._set_excel_step_ready(False)
         if not self.excel_reader:
             return
         items = self.sheet_list.selectedItems()
@@ -545,6 +666,7 @@ class MainWindow(QMainWindow):
             for col in preview.columns:
                 self.sheet_columns_list.addItem(col)
             self._refresh_fk_excel_options()
+            self._set_excel_step_ready(True)
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao pre-visualizar", exc)
 
@@ -689,6 +811,66 @@ class MainWindow(QMainWindow):
             text = text.strip()
         return text.casefold()
 
+    def _apply_fk_conversion(self, column: str, value: object) -> object:
+        if value is None:
+            return value
+        mapping = self._relation_conversions.get(column)
+        if not mapping:
+            return value
+        text = str(value)
+        if self._fk_trim_whitespace:
+            text = text.strip()
+        return mapping.get(text, value)
+
+    def _normalize_for_duplicates(self, value: object) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        text = str(value)
+        text = " ".join(text.split())
+        normalized = unicodedata.normalize("NFKD", text)
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        return normalized.casefold()
+
+    def _is_nullish(self, value: object) -> bool:
+        if value is None:
+            return True
+        try:
+            if pd.isna(value):
+                return True
+        except Exception:
+            pass
+        text = str(value)
+        if not text.strip():
+            return True
+        return False
+
+    def _normalize_similarity_text(self, text: str) -> str:
+        cleaned = " ".join(text.split())
+        cleaned = cleaned.rstrip("sS")
+        normalized = unicodedata.normalize("NFKD", cleaned)
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        return normalized.casefold()
+
+    def _are_values_similar(self, left: str, right: str) -> bool:
+        norm_left = self._normalize_similarity_text(left)
+        norm_right = self._normalize_similarity_text(right)
+        if not norm_left or not norm_right:
+            return False
+        if norm_left == norm_right:
+            return True
+        ratio = SequenceMatcher(None, norm_left, norm_right).ratio()
+        length_gap = abs(len(norm_left) - len(norm_right))
+        if ratio >= 0.9:
+            return True
+        if length_gap <= 1 and ratio >= 0.82:
+            return True
+        return False
+
     def _trim_cell_whitespace(self, value: object) -> object:
         if isinstance(value, str):
             return value.strip()
@@ -734,6 +916,105 @@ class MainWindow(QMainWindow):
                 self.fk_excel_combo.addItem(item.text())
         enable = self.fk_target_combo.count() > 0 and self.fk_excel_combo.count() > 0
         self.add_fk_btn.setEnabled(enable)
+        self._refresh_fk_conversion_hint()
+
+    def _remove_virtual_extra_columns(self) -> None:
+        if not self._virtual_extra_columns:
+            return
+        # Remove mappings that reference virtual columns
+        rows_to_remove = []
+        for row in range(self.mapping_table.rowCount()):
+            sheet_item = self.mapping_table.item(row, 0)
+            if sheet_item and sheet_item.text() in self._virtual_extra_columns:
+                rows_to_remove.append(row)
+        for row in sorted(rows_to_remove, reverse=True):
+            self.mapping_table.removeRow(row)
+        # Remove from sheet columns list
+        keep_items: List[QListWidgetItem] = []
+        for idx in range(self.sheet_columns_list.count()):
+            item = self.sheet_columns_list.item(idx)
+            if item and item.text() not in self._virtual_extra_columns:
+                keep_items.append(item)
+        self.sheet_columns_list.clear()
+        for item in keep_items:
+            self.sheet_columns_list.addItem(item.text())
+        self._virtual_extra_columns.clear()
+        self._refresh_fk_excel_options()
+
+    def _next_extra_column_name(self) -> str:
+        existing = {self.sheet_columns_list.item(i).text() for i in range(self.sheet_columns_list.count())}
+        existing |= set(self._virtual_extra_columns)
+        idx = 1
+        while True:
+            candidate = f"extra_{idx}"
+            if candidate not in existing:
+                return candidate
+            idx += 1
+
+    def _ensure_virtual_extra_column(self) -> str:
+        name = self._next_extra_column_name()
+        if name not in self._virtual_extra_columns:
+            self._virtual_extra_columns.add(name)
+            self.sheet_columns_list.addItem(name)
+            self._refresh_fk_excel_options()
+        return name
+
+    def _refresh_fk_conversion_hint(self) -> None:
+        if not getattr(self, "fk_conversion_status", None):
+            return
+        if not self._relation_conversions:
+            self.fk_conversion_status.setText("Sem conversões carregadas")
+            return
+        total_cols = len(self._relation_conversions)
+        total_maps = sum(len(m) for m in self._relation_conversions.values())
+        parts = [f"{col}: {len(mapping)}" for col, mapping in list(self._relation_conversions.items())[:3]]
+        if len(self._relation_conversions) > 3:
+            parts.append("...")
+        self.fk_conversion_status.setText(f"Conversões carregadas ({total_cols} col): " + ", ".join(parts))
+
+    def _load_fk_conversion_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importar arquivo de conversões (FK)", str(self.excel_file_path or Path.home()), "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            df = pd.read_csv(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Conversões", f"Erro ao ler o CSV: {exc}")
+            return
+        required_cols = {"coluna_excel", "valor_original", "valor_corrigido"}
+        if not required_cols.issubset(set(df.columns)):
+            QMessageBox.warning(
+                self,
+                "Conversões",
+                "CSV inválido. Esperado colunas: coluna_excel, valor_original, valor_corrigido.",
+            )
+            return
+        conversions: Dict[str, Dict[str, str]] = {}
+        for _, row in df.iterrows():
+            col = str(row["coluna_excel"])
+            src = row["valor_original"]
+            dst = row["valor_corrigido"]
+            if pd.isna(src) or pd.isna(dst):
+                continue
+            src_text = str(src)
+            dst_text = str(dst)
+            if self._fk_trim_whitespace:
+                src_text = src_text.strip()
+                dst_text = dst_text.strip()
+            if not src_text.strip():
+                continue
+            bucket = conversions.setdefault(col, {})
+            bucket[src_text] = dst_text
+        self._relation_conversions = conversions
+        self._last_conversion_file = Path(path)
+        self._refresh_fk_conversion_hint()
+        QMessageBox.information(
+            self,
+            "Conversões",
+            f"Arquivo de conversões carregado.\nColunas: {len(conversions)} | Substituições: {sum(len(m) for m in conversions.values())}",
+        )
 
     def _refresh_fk_table_options(self) -> None:
         tables = self.database.list_tables()
@@ -1023,7 +1304,19 @@ class MainWindow(QMainWindow):
         self._pre_validation_trim_whitespace = False
         self._pre_validation_column = None
         self._pre_validation_last_result = None
+        self._split_enabled = False
+        self._split_column = None
+        self._split_operator = "gt"
+        self._split_length = None
+        self._split_extra_name = None
+        self._remove_virtual_extra_columns()
         self._refresh_pre_validation_hint()
+        self._clear_similarity_state()
+
+    def _clear_similarity_state(self) -> None:
+        self._similarity_replacements = {}
+        self._refresh_similarity_hint()
+        self._refresh_fk_conversion_hint()
 
     def _refresh_pre_validation_hint(self) -> None:
         if not getattr(self, "pre_validation_status", None):
@@ -1034,13 +1327,23 @@ class MainWindow(QMainWindow):
             rules.append("remover espacos extras")
             tooltips.append("Remove espacos em branco no inicio/fim de valores textuais.")
         if self._pre_validation_remove_duplicates and self._pre_validation_column:
-            rule = f"remover duplicados em '{self._pre_validation_column}' (ignora espacos no inicio/fim)"
+            rule = f"remover duplicados em '{self._pre_validation_column}'"
+            if self._pre_validation_trim_whitespace:
+                rule += " (remove espacos e ignora maiusculas/minusculas)"
+            else:
+                rule += " (ignora espacos extras e maiusculas/minusculas)"
             rules.append(rule)
             if self._pre_validation_last_result:
                 total, unique = self._pre_validation_last_result
                 removed = max(total - unique, 0)
                 rules[-1] += f" (previsto remover {removed}/{total})"
                 tooltips.append(f"Duplicados: Total {total} | Removidos {removed} | Restantes {unique}")
+        if self._split_enabled and self._split_column and self._split_length is not None:
+            op_text = ">" if self._split_operator == "gt" else "<"
+            rule = f"mover valores de '{self._split_column}' cujo tamanho {op_text} {self._split_length} p/ coluna extra"
+            rules.append(rule)
+            extra = next(iter(self._virtual_extra_columns), "extra_1") if self._virtual_extra_columns else "extra_1"
+            tooltips.append(f"Cria coluna {extra} com os valores deslocados; coluna original fica vazia nessas linhas.")
         if not rules:
             self.pre_validation_status.setText("Pré-validação: sem regras")
             self.pre_validation_status.setToolTip("")
@@ -1049,6 +1352,34 @@ class MainWindow(QMainWindow):
         tooltip = "\n".join(tooltips) if tooltips else text
         self.pre_validation_status.setText(text)
         self.pre_validation_status.setToolTip(tooltip)
+
+    def _refresh_similarity_hint(self) -> None:
+        if not getattr(self, "similarity_status", None):
+            return
+        # Reset text/tooltip before recomputing to avoid stale content.
+        self.similarity_status.setText("Padronização: inativa")
+        self.similarity_status.setToolTip("")
+        if getattr(self, "export_conversion_btn", None):
+            self.export_conversion_btn.setEnabled(False)
+        if not self._similarity_replacements:
+            self._refresh_fk_conversion_hint()
+            return
+        parts: List[str] = []
+        tooltips: List[str] = []
+        total = 0
+        for col, mapping in self._similarity_replacements.items():
+            count = len(mapping)
+            total += count
+            parts.append(f"{col}: {count} trocas")
+            preview_items = [f"{src} -> {dst}" for src, dst in list(mapping.items())[:3]]
+            if len(mapping) > 3:
+                preview_items.append(f"... (+{len(mapping) - 3})")
+            tooltips.append(f"{col}: " + ", ".join(preview_items))
+        self.similarity_status.setText(f"Padronização: {total} substituições")
+        self.similarity_status.setToolTip("\n".join(tooltips))
+        if getattr(self, "export_conversion_btn", None):
+            self.export_conversion_btn.setEnabled(True)
+        self._refresh_fk_conversion_hint()
 
     def _reset_after_execute(self) -> None:
         self.mapping_table.setRowCount(0)
@@ -1072,10 +1403,16 @@ class MainWindow(QMainWindow):
         self._refresh_fk_target_options()
         self._refresh_required_columns_hint()
         self._clear_pre_validation_state()
+        self._clear_similarity_state()
+        self._last_skipped_null_rows = 0
+        self._last_conversion_file = None
+        self._relation_conversions = {}
+        self._refresh_fk_conversion_hint()
 
     def _on_table_selected(self) -> None:
         items = self.table_list.selectedItems()
         if not items:
+            self._set_db_step_ready(False)
             return
         table = items[0].text()
         self.table_columns = self.database.get_columns(table)
@@ -1111,6 +1448,7 @@ class MainWindow(QMainWindow):
         self._refresh_default_column_options()
         self._refresh_fk_target_options()
         self._refresh_required_columns_hint()
+        self._set_db_step_ready(True)
 
     def _add_mapping(self) -> None:
         sheet_items = self.sheet_columns_list.selectedItems()
@@ -1186,14 +1524,15 @@ class MainWindow(QMainWindow):
         if not mapping and not defaults and not fk_lookups:
             QMessageBox.warning(self, "Mapeamento", "Adicione ao menos um mapeamento ou valor padrão")
             return None
-        missing_required = self._missing_required_columns(mapping, defaults, autogenerate_pk, fk_lookups)
-        if missing_required:
-            QMessageBox.warning(
-                self,
-                "Mapeamento",
-                f"Preencha os campos obrigatórios: {', '.join(missing_required)}",
-            )
-            return None
+        if not self.update_radio.isChecked():
+            missing_required = self._missing_required_columns(mapping, defaults, autogenerate_pk, fk_lookups)
+            if missing_required:
+                QMessageBox.warning(
+                    self,
+                    "Mapeamento",
+                    f"Preencha os campos obrigatórios: {', '.join(missing_required)}",
+                )
+                return None
         header_excel_row = self._current_header_excel_row()
         remove_duplicates = self._pre_validation_remove_duplicates and bool(self._pre_validation_column)
         duplicate_column = self._pre_validation_column if remove_duplicates else None
@@ -1213,6 +1552,11 @@ class MainWindow(QMainWindow):
             trim_whitespace=self._pre_validation_trim_whitespace,
             remove_duplicate_rows=remove_duplicates,
             duplicate_check_column=duplicate_column,
+            similarity_replacements={col: mapping.copy() for col, mapping in self._similarity_replacements.items()},
+            split_column=self._split_column if self._split_enabled else None,
+            split_operator=self._split_operator if self._split_enabled else None,
+            split_length=self._split_length if self._split_enabled else None,
+            split_extra_column=self._split_extra_name if self._split_enabled else None,
         )
 
     def _current_sheet_columns(self) -> List[str]:
@@ -1238,10 +1582,93 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Coluna '{column}' não encontrada na seleção atual")
         # Sempre ignora espaços extras no cálculo de duplicados para não contar valores iguais como distintos.
         df = self._trim_dataframe_whitespace(df, [column])
-        df[column] = df[column].map(self.excel_reader._normalize_cell)
-        total_rows = len(df.index)
-        unique_rows = len(df.drop_duplicates(subset=[column], keep="first").index)
+        if self._similarity_replacements:
+            df = self._apply_similarity_replacements(df, self._similarity_replacements)
+        normalized_series = df[column].map(self._normalize_for_duplicates)
+        total_rows = len(normalized_series.index)
+        unique_rows = len(normalized_series.drop_duplicates().index)
         return total_rows, unique_rows
+
+    def _calculate_similarity_suggestions(
+        self, selection: MappingSelection, column: str
+    ) -> tuple[List[tuple[str, str, int]], int]:
+        if not self.excel_reader:
+            raise ValueError("Nenhuma planilha carregada")
+        df = self.excel_reader._read_dataframe(
+            selection.sheet_name,
+            selection.header_row,
+            data_start_row=None,
+            data_end_row=None,
+            col_start=selection.start_column,
+            col_end=selection.end_column,
+        )
+        if column not in df.columns:
+            raise ValueError(f"Coluna '{column}' não encontrada na seleção atual")
+        if self._pre_validation_trim_whitespace:
+            df = self._trim_dataframe_whitespace(df, [column])
+
+        values: List[str] = []
+        for raw in df[column]:
+            if raw is None:
+                continue
+            try:
+                if pd.isna(raw):
+                    continue
+            except Exception:
+                pass
+            text = str(raw).strip()
+            if not text:
+                continue
+            values.append(text)
+        counts = Counter(values)
+        if len(counts) <= 1:
+            return [], len(values)
+        if len(counts) > 800:
+            raise ValueError("Coluna com muitas variações para análise (limite: 800 valores distintos).")
+        suggestions = self._build_similarity_suggestions(counts)
+        return suggestions, len(values)
+
+    def _build_similarity_suggestions(self, counts: Counter[str]) -> List[tuple[str, str, int]]:
+        unique_values = list(counts.keys())
+        parent: Dict[str, str] = {value: value for value in unique_values}
+
+        def find(value: str) -> str:
+            while parent[value] != value:
+                parent[value] = parent[parent[value]]
+                value = parent[value]
+            return value
+
+        def union(a: str, b: str) -> None:
+            root_a = find(a)
+            root_b = find(b)
+            if root_a == root_b:
+                return
+            if counts[root_a] < counts[root_b]:
+                root_a, root_b = root_b, root_a
+            parent[root_b] = root_a
+
+        for idx, left in enumerate(unique_values):
+            for right in unique_values[idx + 1 :]:
+                if self._are_values_similar(left, right):
+                    union(left, right)
+
+        groups: Dict[str, List[str]] = {}
+        for value in unique_values:
+            root = find(value)
+            groups.setdefault(root, []).append(value)
+
+        suggestions: List[tuple[str, str, int]] = []
+        for members in groups.values():
+            if len(members) <= 1:
+                continue
+            canonical = sorted(members, key=lambda v: (-counts[v], -len(v), v))[0]
+            for member in sorted(members):
+                if member == canonical:
+                    continue
+                suggestions.append((member, canonical, counts[member]))
+
+        suggestions.sort(key=lambda item: (item[1].casefold(), item[0].casefold()))
+        return suggestions
 
     def _open_pre_validation(self) -> None:
         selection = self._collect_mapping()
@@ -1260,13 +1687,60 @@ class MainWindow(QMainWindow):
             selected_column=self._pre_validation_column,
             last_result=self._pre_validation_last_result,
             run_check=lambda col: self._calculate_duplicate_stats(selection, col),
+            split_enabled=self._split_enabled,
+            split_column=self._split_column,
+            split_operator=self._split_operator,
+            split_length=self._split_length,
         )
         if dialog.exec():
             self._pre_validation_remove_duplicates = dialog.remove_duplicates
             self._pre_validation_trim_whitespace = dialog.trim_whitespace
             self._pre_validation_column = dialog.selected_column if dialog.remove_duplicates else None
             self._pre_validation_last_result = dialog.last_result if dialog.remove_duplicates else None
+            self._split_enabled = dialog.split_enabled
+            self._split_column = dialog.split_column if dialog.split_enabled else None
+            self._split_operator = dialog.split_operator if dialog.split_enabled else "gt"
+            self._split_length = dialog.split_length if dialog.split_enabled else None
+            if self._split_enabled and self._split_column and self._split_length is not None:
+                self._split_extra_name = self._ensure_virtual_extra_column()
+            else:
+                self._split_extra_name = None
+                self._remove_virtual_extra_columns()
             self._refresh_pre_validation_hint()
+
+    def _open_similarity_validation(self) -> None:
+        selection = self._collect_mapping()
+        if not selection or not self.excel_reader:
+            return
+        sheet_items = self.sheet_columns_list.selectedItems()
+        if not sheet_items:
+            QMessageBox.warning(self, "Padronização", "Selecione uma coluna do Excel para validar.")
+            return
+        column = sheet_items[0].text()
+        try:
+            suggestions, total_checked = self._calculate_similarity_suggestions(selection, column)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Padronização", str(exc))
+            return
+        if not suggestions:
+            QMessageBox.information(self, "Padronização", "Nenhuma variação encontrada nessa coluna.")
+            self._refresh_similarity_hint()
+            return
+        dialog = SimilarValuesDialog(self, column, suggestions, total_checked)
+        if dialog.exec():
+            self._similarity_replacements[column] = {src: dst for src, dst, _ in suggestions}
+            self._refresh_similarity_hint()
+
+    def _export_similarity_file_action(self) -> None:
+        if not self._similarity_replacements:
+            QMessageBox.information(self, "Conversões", "Nenhuma conversão de palavras encontrada para exportar.")
+            return
+        try:
+            path = self._write_similarity_conversion_file(self._similarity_replacements)
+            if path:
+                QMessageBox.information(self, "Conversões", f"Arquivo de conversões salvo em:\n{path}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Conversões", str(exc))
 
     def _generate_preview(self) -> None:
         selection = self._collect_mapping()
@@ -1289,6 +1763,22 @@ class MainWindow(QMainWindow):
                 text.append("Valores padrão aplicados:")
                 for col, value in selection.default_values.items():
                     text.append(f"- {col}: {value}")
+            if selection.similarity_replacements:
+                text.append("")
+                text.append("Padronização de texto:")
+                for col, mapping in selection.similarity_replacements.items():
+                    example = next(iter(mapping.items()), None)
+                    suffix = f" (ex.: {example[0]} -> {example[1]})" if example else ""
+                    text.append(f"- {col}: {len(mapping)} substituições{suffix}")
+                conv_path = self._similarity_conversion_path()
+                if conv_path:
+                    text.append(f"Arquivo de conversões sugerido: {conv_path}")
+            if selection.split_column and selection.split_length is not None and selection.split_extra_column:
+                text.append("")
+                op = ">" if selection.split_operator == "gt" else "<"
+                text.append(
+                    f"Separação por tamanho: mover '{selection.split_column}' com len {op} {selection.split_length} para '{selection.split_extra_column}'"
+                )
             if selection.fk_lookups:
                 text.append("")
                 text.append("Relacionamentos (descrição -> ID):")
@@ -1376,8 +1866,16 @@ class MainWindow(QMainWindow):
         selection = self._collect_mapping()
         if not selection or not self.excel_reader:
             return
+        progress: QProgressDialog | None = None
         try:
-            records = self._build_records_for_selection(selection)
+            self._cancel_requested = False
+            progress = self._create_progress_dialog("Importação", "Processando dados e enviando para o banco...")
+            records = self._build_records_for_selection(
+                selection, cancel_checker=lambda: bool(self._cancel_requested)
+            )
+            if self._cancel_requested:
+                QMessageBox.information(self, "Importação", "Operação cancelada.")
+                return
             self._validate_record_lengths(records, selection)
             affected = 0
             if selection.operation == "INSERT":
@@ -1392,10 +1890,33 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "UPDATE", "Selecione uma coluna de junção")
                     return
                 affected = self.database.execute_update(selection.table_name, records, selection.join_column)
-            QMessageBox.information(self, "Importação", f"Registros processados: {affected}")
+            msg = f"Registros processados: {affected}"
+            if self._last_skipped_null_rows:
+                msg += f"\nLinhas ignoradas por estarem vazias: {self._last_skipped_null_rows}"
+            if selection.similarity_replacements:
+                try:
+                    path = self._write_similarity_conversion_file(selection.similarity_replacements)
+                    if path:
+                        msg += f"\nArquivo de conversões: {path}"
+                except Exception as conv_exc:  # noqa: BLE001
+                    QMessageBox.warning(
+                        self,
+                        "Conversões",
+                        f"Não foi possível salvar o arquivo de conversões das palavras: {conv_exc}",
+                    )
+            QMessageBox.information(self, "Importação", msg)
             self._reset_after_execute()
+        except RuntimeError as exc:
+            if "cancelada" in str(exc).lower():
+                QMessageBox.information(self, "Importação", "Operação cancelada.")
+            else:
+                self._show_error("Erro na importação", exc)
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro na importação", exc)
+        finally:
+            if progress:
+                progress.close()
+            self._cancel_requested = False
 
     def _show_error(self, title: str, exc: Exception) -> None:
         traceback.print_exc()
@@ -1428,7 +1949,112 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
-    def _build_records_for_selection(self, selection: MappingSelection) -> List[Dict[str, object]]:
+    def _apply_similarity_replacements(
+        self, df: pd.DataFrame, replacements: Dict[str, Dict[str, str]]
+    ) -> pd.DataFrame:
+        if not replacements:
+            return df
+        for column, mapping in replacements.items():
+            if column not in df.columns or not mapping:
+                continue
+            df[column] = df[column].map(lambda value: mapping.get(value, value) if isinstance(value, str) else value)
+        return df
+
+    def _apply_split_rule(self, df: pd.DataFrame, selection: MappingSelection) -> pd.DataFrame:
+        if not selection.split_column or selection.split_length is None or not selection.split_extra_column:
+            return df
+        column = selection.split_column
+        extra_col = selection.split_extra_column
+        if column not in df.columns:
+            raise ValueError(f"Coluna '{column}' não encontrada para separação por tamanho")
+        # Avoid collision
+        if extra_col in df.columns:
+            extra_col = self._next_extra_column_name()
+            selection.split_extra_column = extra_col
+        df[extra_col] = None
+        for idx, val in df[column].items():
+            if val is None:
+                continue
+            try:
+                if pd.isna(val):
+                    continue
+            except Exception:
+                pass
+            text = str(val)
+            if selection.trim_whitespace:
+                text = text.strip()
+            length = len(text)
+            if (selection.split_operator == "gt" and length > selection.split_length) or (
+                selection.split_operator == "lt" and length < selection.split_length
+            ):
+                df.at[idx, extra_col] = val
+                df.at[idx, column] = None
+        # Register virtual column so UI knows
+        if extra_col not in self._virtual_extra_columns:
+            self._virtual_extra_columns.add(extra_col)
+            self.sheet_columns_list.addItem(extra_col)
+            self._refresh_fk_excel_options()
+        return df
+
+    def _similarity_conversion_path(self) -> Path | None:
+        if not self.excel_file_path:
+            return None
+        base = Path(self.excel_file_path)
+        if not self._similarity_replacements:
+            return base.with_name(f"{base.stem}_conversoes.csv")
+        # Usa a primeira coluna com conversões para compor o nome.
+        first_col = next(iter(self._similarity_replacements.keys()), "coluna")
+        col_slug = str(first_col).replace("/", "_").replace("\\", "_").replace(" ", "_")
+        return base.with_name(f"{col_slug}_{base.stem}_conversoes.csv")
+
+    def _write_similarity_conversion_file(
+        self, replacements: Dict[str, Dict[str, str]], *, warn_if_missing_excel: bool = True
+    ) -> Path | None:
+        if not replacements:
+            return None
+        rows: List[Dict[str, str]] = []
+        for column, mapping in replacements.items():
+            for src, dst in mapping.items():
+                rows.append(
+                    {
+                        "coluna_excel": column,
+                        "valor_original": src,
+                        "valor_corrigido": dst,
+                    }
+                )
+        if not rows:
+            return None
+        target_path = self._similarity_conversion_path()
+        if target_path is None:
+            if warn_if_missing_excel:
+                raise ValueError(
+                    "Não foi possível determinar onde salvar o arquivo de conversões (precisa do Excel carregado)."
+                )
+            return None
+        df = pd.DataFrame(rows)
+        df.to_csv(target_path, index=False)
+        self._last_conversion_file = target_path
+        return target_path
+
+    def _create_progress_dialog(self, title: str, label: str) -> QProgressDialog:
+        dialog = QProgressDialog(label, "Cancelar", 0, 0, self)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(lambda: self._request_cancel(dialog))
+        dialog.show()
+        QApplication.processEvents()
+        return dialog
+
+    def _request_cancel(self, dialog: QProgressDialog) -> None:
+        self._cancel_requested = True
+        dialog.setLabelText("Cancelando... aguarde")
+
+    def _build_records_for_selection(
+        self,
+        selection: MappingSelection,
+        cancel_checker: Optional[Callable[[], bool]] = None,
+    ) -> List[Dict[str, object]]:
         # Carrega todas as colunas necessárias (mapeamento + lookups de FK)
         df = self.excel_reader._read_dataframe(
             selection.sheet_name,
@@ -1440,21 +2066,20 @@ class MainWindow(QMainWindow):
         )
         if selection.trim_whitespace:
             df = self._trim_dataframe_whitespace(df)
+        if selection.similarity_replacements:
+            df = self._apply_similarity_replacements(df, selection.similarity_replacements)
+        df = self._apply_split_rule(df, selection)
         if selection.remove_duplicate_rows and selection.duplicate_check_column:
             if selection.duplicate_check_column not in df.columns:
                 raise ValueError(
                     f"Coluna '{selection.duplicate_check_column}' não encontrada para remover duplicados"
                 )
-            if not selection.trim_whitespace:
-                df[selection.duplicate_check_column] = df[selection.duplicate_check_column].map(
-                    self._trim_cell_whitespace
-                )
-            df[selection.duplicate_check_column] = df[selection.duplicate_check_column].map(
-                self.excel_reader._normalize_cell
-            )
+            dedup_key = f"__dupkey_{selection.duplicate_check_column}"
+            df[dedup_key] = df[selection.duplicate_check_column].map(self._normalize_for_duplicates)
             total_rows = len(df.index)
-            df = df.drop_duplicates(subset=[selection.duplicate_check_column], keep="first")
+            df = df.drop_duplicates(subset=[dedup_key], keep="first")
             df = df.reset_index(drop=True)
+            df = df.drop(columns=[dedup_key])
             self._pre_validation_last_result = (total_rows, len(df.index))
         column_mapping = selection.column_mapping
         if selection.autogenerate_pk and selection.primary_key:
@@ -1465,12 +2090,21 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Colunas da planilha não encontradas: {', '.join(missing_excel)}")
 
         records: List[Dict[str, object]] = []
+        source_columns_for_null_check = [s for s, _ in column_mapping]
+        skipped_null_rows = 0
         for _, row in df.iterrows():
+            if source_columns_for_null_check:
+                if all(self._is_nullish(row.get(col)) for col in source_columns_for_null_check):
+                    skipped_null_rows += 1
+                    continue
+            if cancel_checker and cancel_checker():
+                raise RuntimeError("Operação cancelada pelo usuário")
             record: Dict[str, object] = {}
             for sheet_col, table_col in column_mapping:
                 if sheet_col in row:
                     record[table_col] = self.excel_reader._normalize_cell(row[sheet_col])
             records.append(record)
+        self._last_skipped_null_rows = skipped_null_rows
 
         # Aplica valores padrão
         if selection.default_values:
@@ -1509,6 +2143,7 @@ class MainWindow(QMainWindow):
                 excel_row = first_excel_row + idx
                 for fk in selection.fk_lookups:
                     raw_value = row.get(fk.excel_column)
+                    raw_value = self._apply_fk_conversion(fk.excel_column, raw_value)
                     normalized = self._normalize_lookup_key(raw_value)
                     if not normalized:
                         unresolved.append(
@@ -1551,15 +2186,17 @@ class MainWindow(QMainWindow):
             ]
             df = pd.DataFrame(export_records)
             if kind == "csv":
+                default_path = self._default_export_path("csv", selection)
                 path, _ = QFileDialog.getSaveFileName(
-                    self, "Salvar CSV mapeado", str(Path.home() / "dados_mapeados.csv"), "CSV (*.csv)"
+                    self, "Salvar CSV mapeado", default_path, "CSV (*.csv)"
                 )
                 if not path:
                     return
                 df.to_csv(path, index=False)
             else:
+                default_path = self._default_export_path("xlsx", selection)
                 path, _ = QFileDialog.getSaveFileName(
-                    self, "Salvar Excel mapeado", str(Path.home() / "dados_mapeados.xlsx"), "Excel (*.xlsx)"
+                    self, "Salvar Excel mapeado", default_path, "Excel (*.xlsx)"
                 )
                 if not path:
                     return
@@ -1575,6 +2212,60 @@ class MainWindow(QMainWindow):
             return value.isoformat()
         return value
 
+    def _default_export_path(self, kind: str, selection: MappingSelection) -> str:
+        sheet_slug = selection.sheet_name.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        if self.excel_file_path:
+            base = self.excel_file_path
+            name = f"{base.stem}_{sheet_slug}_mapeado.{kind}"
+            return str(base.with_name(name))
+        return str(Path.home() / f"planilha_{sheet_slug}_mapeado.{kind}")
+
+
+class SimilarValuesDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        column: str,
+        suggestions: List[tuple[str, str, int]],
+        total_values: int,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Padronizar palavras parecidas")
+        self.resize(900, 600)
+        self.setMinimumSize(720, 480)
+
+        layout = QVBoxLayout(self)
+        header = QLabel(
+            f"Encontramos {len(suggestions)} sugestões na coluna '{column}' (avaliadas {total_values} células)."
+            " Deseja aplicar essas substituições?"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        table = QTableWidget(len(suggestions), 3)
+        table.setMinimumHeight(360)
+        table.setHorizontalHeaderLabels(["Valor encontrado", "Sugerido", "Ocorrências"])
+        for row, (source, target, count) in enumerate(suggestions):
+            table.setItem(row, 0, QTableWidgetItem(source))
+            table.setItem(row, 1, QTableWidgetItem(target))
+            table.setItem(row, 2, QTableWidgetItem(str(count)))
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        layout.addWidget(table)
+
+        buttons = QHBoxLayout()
+        apply_btn = QPushButton("Aplicar correções")
+        cancel_btn = QPushButton("Cancelar")
+        apply_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(apply_btn)
+        buttons.addStretch()
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
 
 class PreValidationDialog(QDialog):
     def __init__(
@@ -1587,6 +2278,10 @@ class PreValidationDialog(QDialog):
         selected_column: Optional[str],
         last_result: Optional[Tuple[int, int]],
         run_check: Callable[[str], tuple[int, int]],
+        split_enabled: bool,
+        split_column: Optional[str],
+        split_operator: str,
+        split_length: Optional[int],
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Pré-validação")
@@ -1612,6 +2307,33 @@ class PreValidationDialog(QDialog):
             self.duplicate_column_combo.setCurrentText(selected_column)
         column_layout.addWidget(self.duplicate_column_combo)
         layout.addLayout(column_layout)
+
+        split_group = QGroupBox("Mover valores por tamanho para coluna extra")
+        split_layout = QHBoxLayout(split_group)
+        self.split_checkbox = QCheckBox("Ativar")
+        self.split_checkbox.setChecked(split_enabled)
+        split_layout.addWidget(self.split_checkbox)
+        self.split_column_combo = QComboBox()
+        for col in columns:
+            self.split_column_combo.addItem(col)
+        if split_column and split_column in columns:
+            self.split_column_combo.setCurrentText(split_column)
+        split_layout.addWidget(QLabel("Coluna"))
+        split_layout.addWidget(self.split_column_combo)
+        self.split_operator_combo = QComboBox()
+        self.split_operator_combo.addItem(">", "gt")
+        self.split_operator_combo.addItem("<", "lt")
+        if split_operator in ("gt", "lt"):
+            self.split_operator_combo.setCurrentIndex(0 if split_operator == "gt" else 1)
+        split_layout.addWidget(self.split_operator_combo)
+        self.split_length_spin = QSpinBox()
+        self.split_length_spin.setMinimum(1)
+        self.split_length_spin.setMaximum(10_000)
+        if split_length:
+            self.split_length_spin.setValue(split_length)
+        split_layout.addWidget(QLabel("Qtde caracteres"))
+        split_layout.addWidget(self.split_length_spin)
+        layout.addWidget(split_group)
 
         actions_layout = QHBoxLayout()
         self.check_duplicates_btn = QPushButton("Checar duplicados")
@@ -1658,6 +2380,24 @@ class PreValidationDialog(QDialog):
     def last_result(self) -> Optional[Tuple[int, int]]:
         return self._last_result if self.remove_duplicates else None
 
+    @property
+    def split_enabled(self) -> bool:
+        return self.split_checkbox.isChecked()
+
+    @property
+    def split_column(self) -> Optional[str]:
+        if not self.split_enabled or self.split_column_combo.count() == 0:
+            return None
+        return self.split_column_combo.currentText()
+
+    @property
+    def split_operator(self) -> str:
+        return self.split_operator_combo.currentData() or "gt"
+
+    @property
+    def split_length(self) -> Optional[int]:
+        return self.split_length_spin.value() if self.split_enabled else None
+
     def _on_check_duplicates(self) -> None:
         column = self.selected_column
         if not column:
@@ -1681,6 +2421,13 @@ class PreValidationDialog(QDialog):
         if self.remove_duplicates and self._last_result is None:
             QMessageBox.warning(self, "Pré-validação", "Execute a checagem antes de aplicar a remoção de duplicados")
             return
+        if self.split_enabled:
+            if not self.split_column:
+                QMessageBox.warning(self, "Pré-validação", "Selecione a coluna para mover os valores.")
+                return
+            if not self.split_length or self.split_length <= 0:
+                QMessageBox.warning(self, "Pré-validação", "Informe um valor mínimo de caracteres maior que zero.")
+                return
         self.accept()
 
 
