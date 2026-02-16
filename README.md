@@ -47,6 +47,41 @@ Projeto desktop em Python + Qt (PySide6) para importar planilhas Excel (XLSX) e 
    - Escolher operação (INSERT ou UPDATE) e, para UPDATE, escolher o campo de junção (PK ou outro campo).
    - Pré-visualizar e confirmar a execução.
 
+## Gerar instalador (Windows)
+Foi adicionado um fluxo de build para empacotar o app em `.exe` (PyInstaller) e gerar um instalador `.exe` (Inno Setup).
+
+### Pré-requisitos
+1. Python 3.11+ instalado e disponível no PATH.
+2. Dependências do projeto instaladas (`pip install -r requirements.txt`).
+3. **Inno Setup 6** instalado para gerar o instalador final:
+   - https://jrsoftware.org/isinfo.php
+   - O script detecta `iscc` no PATH ou em `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`.
+
+### Comandos
+No PowerShell, a partir da raiz do projeto:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
+```
+
+Esse comando:
+- instala/atualiza dependências de build (incluindo PyInstaller);
+- gera o executável em `dist/ImportDataDB/`;
+- gera o instalador em `output/ImportDataDB-Setup.exe`.
+
+### Opções úteis
+- Gerar apenas o executável (sem instalador):
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1 -SkipInstaller
+  ```
+
+- Não limpar cache do PyInstaller:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1 -NoClean
+  ```
+
 ## Próximos passos sugeridos
 - Consolidar a organização interna iniciada em `src/` (ex.: `src/ui`, `src/db`, `src/excel`).
 - Adicionar scripts de conveniência (`make` ou `Invoke-Task`) para setup, lint e testes.
