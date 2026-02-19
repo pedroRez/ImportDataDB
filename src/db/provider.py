@@ -31,7 +31,7 @@ class DatabaseProvider:
         if not self.engine:
             return []
         inspector = inspect(self.engine)
-        return inspector.get_table_names(schema=schema)
+        return sorted(inspector.get_table_names(schema=schema), key=str.casefold)
 
     def get_columns(self, table_name: str, schema: str = "public") -> List[ColumnInfo]:
         if not self.engine:
