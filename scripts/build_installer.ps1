@@ -8,6 +8,10 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $projectRoot
 
+$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$pythonExe = if (Test-Path $venvPython) { $venvPython } else { 'python' }
+$appVersion = (& $pythonExe -c "from src.version import __version__; print(__version__)").Trim()
+
 $pyInstallerArgs = @(
     '--noconfirm',
     '--windowed',
@@ -21,15 +25,15 @@ if (-not $NoClean) {
     $pyInstallerArgs = @('--clean') + $pyInstallerArgs
 }
 
-Write-Host '==> Instalando dependências de build (PyInstaller)...' -ForegroundColor Cyan
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt pyinstaller
+Write-Host '==> Instalando dependencias de build (PyInstaller)...' -ForegroundColor Cyan
+& $pythonExe -m pip install --upgrade pip
+& $pythonExe -m pip install -r requirements.txt pyinstaller
 
-Write-Host '==> Gerando executável com PyInstaller...' -ForegroundColor Cyan
-python -m PyInstaller @pyInstallerArgs
+Write-Host "==> Gerando executavel com PyInstaller (versao $appVersion)..." -ForegroundColor Cyan
+& $pythonExe -m PyInstaller @pyInstallerArgs
 
 if ($SkipInstaller) {
-    Write-Host '==> Build concluído. Instalador foi pulado por -SkipInstaller.' -ForegroundColor Yellow
+    Write-Host '==> Build concluido. Instalador foi pulado por -SkipInstaller.' -ForegroundColor Yellow
     exit 0
 }
 
@@ -40,7 +44,7 @@ if (-not $iscc) {
         $isccPath = $defaultIsccPath
     }
     else {
-        throw 'Inno Setup (ISCC.exe) não encontrado. Instale o Inno Setup 6 ou rode com -SkipInstaller.'
+        throw 'Inno Setup (ISCC.exe) nao encontrado. Instale o Inno Setup 6 ou rode com -SkipInstaller.'
     }
 }
 else {
@@ -48,6 +52,6 @@ else {
 }
 
 Write-Host '==> Gerando instalador (Inno Setup)...' -ForegroundColor Cyan
-& $isccPath 'installer/ImportDataDB.iss'
+& $isccPath "/DMyAppVersion=$appVersion" 'installer/ImportDataDB.iss'
 
-Write-Host '==> Concluído. Verifique a pasta output/ para o instalador.' -ForegroundColor Green
+Write-Host "==> Concluido. Verifique a pasta output/ para o instalador da versao $appVersion." -ForegroundColor Green

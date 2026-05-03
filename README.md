@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 Esse comando:
 - instala/atualiza dependências de build (incluindo PyInstaller);
 - gera o executável em `dist/ImportDataDB/`;
-- gera o instalador em `output/ImportDataDB-Setup.exe`.
+- gera o instalador em `output/ImportDataDB-Setup-<versao>.exe`.
 
 ### Opções úteis
 - Gerar apenas o executável (sem instalador):

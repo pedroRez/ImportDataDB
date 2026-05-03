@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+/build/
+/dist/
+/output/
+/*.spec
+/Inventário Arcos ( Obra 046 ).xls

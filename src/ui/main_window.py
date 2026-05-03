@@ -51,13 +51,14 @@ from src.core.xerife_bridge import run_xerife_stock_batch
 from src.core.xerife_stock import XerifeStockImporter
 from src.db.provider import ColumnInfo, DatabaseProvider
 from src.excel.reader import ExcelReader, SheetPreview
+from src.version import APP_NAME, __version__
 
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ImportDataDB")
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1200, 800)
 
         self.database = DatabaseProvider()
