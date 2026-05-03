@@ -49,6 +49,18 @@ class ExcelReader:
             normalized.append(name)
         return normalized
 
+    def _drop_empty_edge_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or df.shape[1] == 0:
+            return df
+
+        non_empty = [not df.iloc[:, idx].isna().all() for idx in range(df.shape[1])]
+        if not any(non_empty):
+            return df.iloc[:, 0:0]
+
+        first_idx = non_empty.index(True)
+        last_idx = len(non_empty) - 1 - list(reversed(non_empty)).index(True)
+        return df.iloc[:, first_idx : last_idx + 1]
+
     def _read_dataframe(
         self,
         sheet_name: str,
@@ -79,6 +91,7 @@ class ExcelReader:
             end_idx = col_end if col_end else None
             df = df.iloc[:, start_idx:end_idx]
 
+        df = self._drop_empty_edge_columns(df)
         df.columns = self._normalize_columns(df.columns)
 
         first_data_row = header_row + 1

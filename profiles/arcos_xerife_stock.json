@@ -1,0 +1,75 @@
+{
+  "id": "arcos_xerife_stock",
+  "name": "Arcos -> Xerife Estoque",
+  "target_type": "xerife_stock",
+  "description": "Perfil inicial para importar o inventario da Arcos para o estoque do Xerife.",
+  "sheet_name": "Invent\u00e1rio",
+  "header_row": 5,
+  "data_start_row": 6,
+  "col_start": 1,
+  "filial_id": 1,
+  "usuario_id": 1,
+  "source_key_strategy": [
+    "COD PRODUTO",
+    "IDPRD"
+  ],
+  "field_map": {
+    "nome": "NOME FANTASIA",
+    "tipo": "FAMILIA N1",
+    "grupo_produto": "FAMILIA N2",
+    "source_unit": "UNIDADE CONTROLE",
+    "estoque_atual": "QUANTIDADE",
+    "valor_medio_unitario": "CUSTO MEDIO"
+  },
+  "defaults": {
+    "estoque_minimo": 0,
+    "valor_medio_unitario": 0,
+    "usuario_id": 1
+  },
+  "filters": {
+    "skip_units": [
+      "NAN"
+    ]
+  },
+  "unit_rules": [
+    {
+      "mode": "direct",
+      "values": [
+        "UN",
+        "KG",
+        "L",
+        "M",
+        "M2",
+        "M3",
+        "PAR",
+        "CT"
+      ]
+    },
+    {
+      "mode": "alias",
+      "map": {
+        "LT": "L",
+        "MT": "M"
+      }
+    },
+    {
+      "mode": "package_regex",
+      "units": [
+        "BD",
+        "BD20",
+        "CX",
+        "FR",
+        "GL",
+        "LA",
+        "PCT",
+        "TAM"
+      ],
+      "pattern": "(?P<qty>\\d+(?:[.,]\\d+)?)\\s*(?P<unit>KG|G|GR|L|LT|ML|M3|M2|M|MT)\\b",
+      "content_aliases": {
+        "GR": "G",
+        "LT": "L",
+        "MT": "M"
+      }
+    }
+  ]
+}
