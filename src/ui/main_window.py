@@ -15,11 +15,13 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -36,10 +38,12 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -48,9 +52,11 @@ from PySide6.QtWidgets import (
 from src.core.mapping import ForeignKeyLookup, MappingSelection
 from src.core.profiles import ImportProfile, list_profiles, load_profile, save_profile
 from src.core.xerife_bridge import run_xerife_stock_batch
-from src.core.xerife_stock import XerifeStockImporter
+from src.core.xerife_stock import ValidationIssue, XerifeStockImporter, XerifeValidationResult
 from src.db.provider import ColumnInfo, DatabaseProvider
 from src.excel.reader import ExcelReader, SheetPreview
+from src.ui.quick_import import ConnectionStatusBadge, QuickImportPage
+from src.ui.theme import build_app_stylesheet
 from src.version import APP_NAME, __version__
 
 
@@ -87,6 +93,10 @@ class MainWindow(QMainWindow):
 
         self._excel_step_ready = False
         self._db_step_ready = False
+        self._available_profiles: List[ImportProfile] = []
+        self._last_validation_result: XerifeValidationResult | None = None
+        self._last_import_result: Dict[str, Any] | None = None
+        self._quick_mode = "quick"
 
         self.host_edit = QLineEdit("localhost")
         self.port_edit = QLineEdit("5432")
@@ -99,6 +109,9 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_layout()
+        self.setStyleSheet(build_app_stylesheet())
+        self._set_mode("quick")
+        self._sync_quick_workflow_state()
 
     def _build_menu(self) -> None:
         open_action = QAction("Abrir Excel", self)
@@ -109,52 +122,217 @@ class MainWindow(QMainWindow):
 
     def _build_layout(self) -> None:
         central = QWidget()
+        central.setObjectName("AppShell")
         central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(24, 24, 24, 24)
+        central_layout.setSpacing(16)
+
+        central_layout.addWidget(self._build_shell_header())
+        central_layout.addWidget(self._build_mode_switch())
+
+        self.content_stack = QStackedWidget()
+        self.quick_page = self._build_quick_import_page()
+        self.advanced_page = self._build_advanced_page()
+        self.content_stack.addWidget(self.quick_page)
+        self.content_stack.addWidget(self.advanced_page)
+        central_layout.addWidget(self.content_stack, 1)
+
+        self.setCentralWidget(central)
+        self._update_step_progress()
+
+    def _build_shell_header(self) -> QWidget:
+        shell = QFrame()
+        shell.setProperty("card", True)
+        shell.setProperty("modeShell", True)
+        layout = QHBoxLayout(shell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        title_block = QFrame()
+        title_block.setProperty("card", True)
+        title_layout = QVBoxLayout(title_block)
+        title_layout.setContentsMargins(22, 20, 22, 20)
+        title_layout.setSpacing(6)
+
+        eyebrow = QLabel(f"{APP_NAME} {__version__}")
+        eyebrow.setProperty("role", "eyebrow")
+        title_layout.addWidget(eyebrow)
+
+        title = QLabel("Importação rápida para o Xerife")
+        title.setProperty("role", "title")
+        title_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Selecione um modelo, valide a planilha e envie o lote com um fluxo mais claro. "
+            "O modo avançado continua disponível para mapeamentos técnicos."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setProperty("role", "muted")
+        title_layout.addWidget(subtitle)
+
+        layout.addWidget(title_block, 1)
+
+        status_block = QFrame()
+        status_block.setProperty("card", True)
+        status_layout = QVBoxLayout(status_block)
+        status_layout.setContentsMargins(22, 20, 22, 20)
+        status_layout.setSpacing(12)
+
+        status_title = QLabel("Conexão do banco")
+        status_title.setProperty("role", "card-title")
+        status_layout.addWidget(status_title)
+
+        self.connection_status_label = ConnectionStatusBadge()
+        status_layout.addWidget(self.connection_status_label)
+
+        self.connection_btn = QPushButton("Configurar conexão")
+        self.connection_btn.setProperty("variant", "primary")
+        self.connection_btn.clicked.connect(self._open_connection_dialog)
+        status_layout.addWidget(self.connection_btn, alignment=Qt.AlignLeft)
+
+        layout.addWidget(status_block, 0)
+        return shell
+
+    def _build_mode_switch(self) -> QWidget:
+        container = QFrame()
+        container.setProperty("card", True)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        text = QLabel("Escolha como quer trabalhar:")
+        text.setProperty("role", "card-title")
+        layout.addWidget(text)
+
+        self.mode_button_group = QButtonGroup(self)
+        self.mode_button_group.setExclusive(True)
+
+        self.quick_mode_btn = QToolButton()
+        self.quick_mode_btn.setText("Importação rápida")
+        self.quick_mode_btn.setCheckable(True)
+        self.quick_mode_btn.setProperty("modeButton", True)
+        self.quick_mode_btn.clicked.connect(lambda: self._set_mode("quick"))
+        self.mode_button_group.addButton(self.quick_mode_btn)
+        layout.addWidget(self.quick_mode_btn)
+
+        self.advanced_mode_btn = QToolButton()
+        self.advanced_mode_btn.setText("Modo avançado")
+        self.advanced_mode_btn.setCheckable(True)
+        self.advanced_mode_btn.setProperty("modeButton", True)
+        self.advanced_mode_btn.clicked.connect(lambda: self._set_mode("advanced"))
+        self.mode_button_group.addButton(self.advanced_mode_btn)
+        layout.addWidget(self.advanced_mode_btn)
+        layout.addStretch()
+        return container
+
+    def _build_quick_import_page(self) -> QuickImportPage:
+        page = QuickImportPage()
+        page.stepper.stepRequested.connect(page.set_step)
+        page.use_profile_btn.clicked.connect(self._apply_selected_quick_profile)
+        page.new_profile_btn.clicked.connect(self._open_advanced_profile_editor)
+        page.model_next_btn.clicked.connect(lambda: page.set_step(1))
+        page.spreadsheet_back_btn.clicked.connect(lambda: page.set_step(0))
+        page.spreadsheet_next_btn.clicked.connect(lambda: page.set_step(2))
+        page.validation_back_btn.clicked.connect(lambda: page.set_step(1))
+        page.validation_next_btn.clicked.connect(lambda: page.set_step(3))
+        page.import_back_btn.clicked.connect(lambda: page.set_step(2))
+        page.file_drop.select_button.clicked.connect(self._choose_excel)
+        page.file_drop.fileDropped.connect(self._load_excel_file_from_drop)
+        page.refresh_preview_btn.clicked.connect(self._refresh_sheet_preview)
+        page.quick_sheet_combo.currentTextChanged.connect(self._on_quick_sheet_changed)
+        page.profile_list.currentItemChanged.connect(lambda _current, _previous: self._sync_quick_workflow_state())
+        page.validate_btn.clicked.connect(self._validate_profile_only)
+        page.import_btn.clicked.connect(self._import_validated_profile)
+        page.validation_details_btn.clicked.connect(self._toggle_validation_details)
+        page.set_step(0)
+        return page
+
+    def _build_advanced_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        intro = QFrame()
+        intro.setProperty("card", True)
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(24, 22, 24, 22)
+        intro_layout.setSpacing(8)
+
+        intro_eyebrow = QLabel("Modo avançado")
+        intro_eyebrow.setProperty("role", "eyebrow")
+        intro_layout.addWidget(intro_eyebrow)
+
+        intro_title = QLabel("Mapeamento técnico e importação genérica")
+        intro_title.setProperty("role", "section-title")
+        intro_layout.addWidget(intro_title)
+
+        intro_text = QLabel(
+            "Aqui ficam os controles de Excel, banco de dados, mapeamento, valores padrão, "
+            "FK e pré-visualização detalhada. A home continua dedicada ao fluxo rápido."
+        )
+        intro_text.setWordWrap(True)
+        intro_text.setProperty("role", "muted")
+        intro_layout.addWidget(intro_text)
+        layout.addWidget(intro)
 
         self.step_header_label = QLabel()
         self.step_hint_label = QLabel()
         self.step_hint_label.setWordWrap(True)
-        central_layout.addWidget(self.step_header_label)
-        central_layout.addWidget(self.step_hint_label)
-        central_layout.addWidget(self._build_profile_panel())
+
+        progress_card = QFrame()
+        progress_card.setProperty("card", True)
+        progress_layout = QVBoxLayout(progress_card)
+        progress_layout.setContentsMargins(20, 18, 20, 18)
+        progress_layout.setSpacing(6)
+        progress_layout.addWidget(self.step_header_label)
+        progress_layout.addWidget(self.step_hint_label)
+        layout.addWidget(progress_card)
+
+        layout.addWidget(self._build_profile_panel())
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_excel_tab(), "Step 1 - Excel")
-        self.tabs.addTab(self._build_database_tab(), "Step 2 - Banco de Dados")
-        self.tabs.addTab(self._build_mapping_tab(), "Step 3 - Mapeamento")
-
-        central_layout.addWidget(self.tabs)
-        self.setCentralWidget(central)
-        self._update_step_progress()
+        self.tabs.addTab(self._build_excel_tab(), "1. Excel")
+        self.tabs.addTab(self._build_database_tab(), "2. Banco de dados")
+        self.tabs.addTab(self._build_mapping_tab(), "3. Mapeamento")
+        layout.addWidget(self.tabs, 1)
+        return page
 
     def _build_profile_panel(self) -> QWidget:
-        panel = QGroupBox("Fluxo rapido por modelo")
+        panel = QGroupBox("Modelos e parametros do fluxo rapido")
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(16)
 
         saved_group = QGroupBox("Usar modelo salvo")
         saved_layout = QVBoxLayout(saved_group)
+        saved_layout.setSpacing(14)
 
-        saved_row = QHBoxLayout()
-        saved_row.addWidget(QLabel("Modelo"))
+        saved_grid = QGridLayout()
+        saved_grid.setHorizontalSpacing(12)
+        saved_grid.setVerticalSpacing(12)
+        saved_grid.addWidget(QLabel("Modelo"), 0, 0)
         self.profile_combo = QComboBox()
         self.profile_combo.currentIndexChanged.connect(self._on_profile_combo_changed)
-        saved_row.addWidget(self.profile_combo, 1)
+        saved_grid.addWidget(self.profile_combo, 0, 1, 1, 2)
         self.profile_load_btn = QPushButton("Aplicar modelo")
         self.profile_load_btn.clicked.connect(self._apply_selected_profile)
-        saved_row.addWidget(self.profile_load_btn)
+        saved_grid.addWidget(self.profile_load_btn, 0, 3)
         self.profile_refresh_btn = QPushButton("Atualizar lista")
         self.profile_refresh_btn.clicked.connect(self._refresh_profile_options)
-        saved_row.addWidget(self.profile_refresh_btn)
-        saved_layout.addLayout(saved_row)
+        saved_grid.addWidget(self.profile_refresh_btn, 0, 4)
+        saved_layout.addLayout(saved_grid)
 
-        action_row = QHBoxLayout()
+        action_row = QGridLayout()
+        action_row.setHorizontalSpacing(12)
+        action_row.setVerticalSpacing(12)
         self.quick_choose_file_btn = QPushButton("Escolher planilha")
         self.quick_choose_file_btn.clicked.connect(self._choose_excel)
-        action_row.addWidget(self.quick_choose_file_btn)
+        action_row.addWidget(self.quick_choose_file_btn, 0, 0)
         self.quick_validate_btn = QPushButton("Validar e importar")
+        self.quick_validate_btn.setProperty("variant", "primary")
         self.quick_validate_btn.clicked.connect(self._validate_and_import_profile)
-        action_row.addWidget(self.quick_validate_btn)
-        action_row.addStretch()
+        action_row.addWidget(self.quick_validate_btn, 0, 1)
         saved_layout.addLayout(action_row)
 
         self.profile_summary_label = QLabel("Selecione um modelo salvo para carregar o mapeamento e executar o fluxo rapido.")
@@ -164,35 +342,41 @@ class MainWindow(QMainWindow):
 
         edit_group = QGroupBox("Criar/editar modelo")
         edit_layout = QVBoxLayout(edit_group)
+        edit_layout.setSpacing(14)
 
-        id_row = QHBoxLayout()
-        id_row.addWidget(QLabel("ID"))
+        id_grid = QGridLayout()
+        id_grid.setHorizontalSpacing(12)
+        id_grid.setVerticalSpacing(12)
+        id_grid.addWidget(QLabel("ID"), 0, 0)
         self.profile_id_edit = QLineEdit()
-        id_row.addWidget(self.profile_id_edit)
-        id_row.addWidget(QLabel("Nome"))
+        id_grid.addWidget(self.profile_id_edit, 0, 1)
+        id_grid.addWidget(QLabel("Nome"), 0, 2)
         self.profile_name_edit = QLineEdit()
-        id_row.addWidget(self.profile_name_edit, 1)
-        edit_layout.addLayout(id_row)
+        id_grid.addWidget(self.profile_name_edit, 0, 3)
+        edit_layout.addLayout(id_grid)
 
-        meta_row = QHBoxLayout()
-        meta_row.addWidget(QLabel("Alvo"))
+        meta_grid = QGridLayout()
+        meta_grid.setHorizontalSpacing(12)
+        meta_grid.setVerticalSpacing(12)
+        meta_grid.addWidget(QLabel("Alvo"), 0, 0)
         self.profile_target_combo = QComboBox()
         self.profile_target_combo.addItem("xerife_stock")
-        meta_row.addWidget(self.profile_target_combo)
-        meta_row.addWidget(QLabel("Filial"))
+        meta_grid.addWidget(self.profile_target_combo, 0, 1)
+        meta_grid.addWidget(QLabel("Filial"), 0, 2)
         self.profile_filial_spin = QSpinBox()
         self.profile_filial_spin.setMinimum(0)
         self.profile_filial_spin.setValue(1)
-        meta_row.addWidget(self.profile_filial_spin)
-        meta_row.addWidget(QLabel("Usuario"))
+        meta_grid.addWidget(self.profile_filial_spin, 0, 3)
+        meta_grid.addWidget(QLabel("Usuario"), 1, 0)
         self.profile_usuario_spin = QSpinBox()
         self.profile_usuario_spin.setMinimum(0)
         self.profile_usuario_spin.setValue(1)
-        meta_row.addWidget(self.profile_usuario_spin)
+        meta_grid.addWidget(self.profile_usuario_spin, 1, 1)
         self.profile_save_btn = QPushButton("Salvar modelo atual")
+        self.profile_save_btn.setProperty("variant", "primary")
         self.profile_save_btn.clicked.connect(self._save_current_profile)
-        meta_row.addWidget(self.profile_save_btn)
-        edit_layout.addLayout(meta_row)
+        meta_grid.addWidget(self.profile_save_btn, 1, 3)
+        edit_layout.addLayout(meta_grid)
 
         helper = QLabel(
             "O modelo salvo usa a aba, cabecalho, faixa de linhas/colunas e o alvo atual. "
@@ -204,6 +388,263 @@ class MainWindow(QMainWindow):
 
         self._refresh_profile_options()
         return panel
+
+    def _set_mode(self, mode: str) -> None:
+        self._quick_mode = mode
+        is_quick = mode == "quick"
+        self.quick_mode_btn.setChecked(is_quick)
+        self.advanced_mode_btn.setChecked(not is_quick)
+        self.content_stack.setCurrentWidget(self.quick_page if is_quick else self.advanced_page)
+
+    def _selected_quick_profile_id(self) -> str | None:
+        if not hasattr(self, "quick_page"):
+            return None
+        return self.quick_page.selected_profile_id()
+
+    def _apply_selected_quick_profile(self) -> None:
+        profile_id = self._selected_quick_profile_id()
+        if not profile_id:
+            QMessageBox.warning(self, "Modelo", "Selecione um modelo salvo na lista.")
+            return
+        profile = load_profile(profile_id)
+        self._apply_profile(profile)
+        self.quick_page.set_step(1)
+
+    def _open_advanced_profile_editor(self) -> None:
+        self._set_mode("advanced")
+        self.profile_id_edit.setFocus()
+
+    def _toggle_validation_details(self) -> None:
+        visible = not self.quick_page.validation_details.isVisible()
+        self.quick_page.validation_details.setVisible(visible)
+        self.quick_page.validation_details_btn.setText("Ocultar detalhes" if visible else "Ver detalhes")
+
+    def _load_excel_file_from_drop(self, file_name: str) -> None:
+        self._load_excel_file(Path(file_name))
+
+    def _set_connection_status(self, text: str, *, connected: bool, tone: str | None = None) -> None:
+        self.connection_status_label.set_status(connected, text, tone=tone)
+        if hasattr(self, "quick_page"):
+            self.quick_page.connection_hint.setText(text)
+
+    def _refresh_widget_style(self, widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def _set_selected_sheet(self, sheet_name: str) -> None:
+        if not self.excel_reader or not sheet_name:
+            return
+        matching_items = self.sheet_list.findItems(sheet_name, Qt.MatchExactly)
+        if matching_items:
+            self.sheet_list.blockSignals(True)
+            self.sheet_list.setCurrentItem(matching_items[0])
+            self.sheet_list.blockSignals(False)
+            self._on_sheet_selected()
+
+    def _on_quick_sheet_changed(self, sheet_name: str) -> None:
+        if not sheet_name or not self.excel_reader:
+            return
+        selected_items = self.sheet_list.selectedItems()
+        if selected_items and selected_items[0].text() == sheet_name:
+            return
+        self._set_selected_sheet(sheet_name)
+
+    def _set_quick_sheet_options(self) -> None:
+        if not hasattr(self, "quick_page") or not hasattr(self, "sheet_list"):
+            return
+        current_text = self.quick_page.quick_sheet_combo.currentText()
+        self.quick_page.quick_sheet_combo.blockSignals(True)
+        self.quick_page.quick_sheet_combo.clear()
+        for index in range(self.sheet_list.count()):
+            self.quick_page.quick_sheet_combo.addItem(self.sheet_list.item(index).text())
+        selected_items = self.sheet_list.selectedItems()
+        if selected_items:
+            self.quick_page.quick_sheet_combo.setCurrentText(selected_items[0].text())
+        elif current_text:
+            self.quick_page.quick_sheet_combo.setCurrentText(current_text)
+        self.quick_page.quick_sheet_combo.blockSignals(False)
+
+    def _summarize_range(self) -> str:
+        header_row = self._current_header_excel_row()
+        data_start_row = self._current_data_start_excel_row(header_row)
+        data_end_row = self.row_end_spin.value() or 0
+        col_start = self.col_start_spin.value() or 1
+        col_end = self.col_end_spin.value() or 0
+        row_text = f"linhas {data_start_row} até {data_end_row or 'fim'}"
+        col_text = f"colunas {col_start} até {col_end or 'fim'}"
+        return f"Cabeçalho na linha {header_row}; {row_text}; {col_text}."
+
+    def _sync_quick_workflow_state(self) -> None:
+        if not hasattr(self, "quick_page"):
+            return
+
+        profile_items = [(profile.id, profile.name, profile.summary) for profile in self._available_profiles]
+        self.quick_page.set_profile_items(profile_items)
+        self.quick_page.profile_list.blockSignals(True)
+        self.quick_page.select_profile(self.loaded_profile_id or self._selected_quick_profile_id())
+        self.quick_page.profile_list.blockSignals(False)
+
+        selected_profile = None
+        selected_profile_id = self._selected_quick_profile_id() or self.profile_combo.currentData()
+        if selected_profile_id:
+            try:
+                selected_profile = load_profile(str(selected_profile_id))
+            except FileNotFoundError:
+                selected_profile = None
+
+        applied_profile = None
+        if self.loaded_profile_id:
+            try:
+                applied_profile = load_profile(self.loaded_profile_id)
+            except FileNotFoundError:
+                applied_profile = None
+
+        if applied_profile:
+            model_detail = f"Modelo aplicado: {applied_profile.summary}"
+        elif selected_profile:
+            model_detail = f"Selecionado: {selected_profile.summary}. Clique em 'Usar este modelo' para aplicar."
+        else:
+            model_detail = "Nenhum modelo aplicado."
+        self.quick_page.profile_detail_label.setText(model_detail)
+
+        file_text = str(self.excel_file_path) if self.excel_file_path else "Nenhum arquivo selecionado."
+        self.quick_page.file_name_label.setText(file_text)
+        self.quick_page.range_summary_label.setText(self._summarize_range() if self.excel_reader else "Aguardando modelo e planilha.")
+        self._set_quick_sheet_options()
+
+        validation = self._last_validation_result
+        if validation:
+            blocking = len(validation.issues)
+            skipped = validation.skipped_rows
+            self.quick_page.validation_cards["total"].set_value(str(validation.total_rows))
+            self.quick_page.validation_cards["importable"].set_value(
+                str(validation.importable_rows),
+                tone="success" if validation.importable_rows else "warning",
+            )
+            self.quick_page.validation_cards["skipped"].set_value(str(skipped), tone="warning" if skipped else "neutral")
+            self.quick_page.validation_cards["blocking"].set_value(
+                str(blocking),
+                tone="danger" if blocking else "success",
+            )
+            if blocking:
+                self.quick_page.validation_status_label.setProperty("badgeTone", "danger")
+                self.quick_page.validation_status_label.setText(
+                    f"Foram encontrados {blocking} erro(s) bloqueantes. Ajuste o perfil ou use o modo avançado."
+                )
+                self._refresh_widget_style(self.quick_page.validation_status_label)
+            else:
+                tone = "warning" if skipped else "success"
+                self.quick_page.validation_status_label.setProperty("badgeTone", tone)
+                self.quick_page.validation_status_label.setText(
+                    f"Validação pronta. Importáveis: {validation.importable_rows}. Descartadas: {validation.skipped_rows}."
+                )
+                self._refresh_widget_style(self.quick_page.validation_status_label)
+            self.quick_page.validation_details.setPlainText(validation.preview_text())
+            issue_rows = self._build_quick_issue_rows(validation)
+            self.quick_page.populate_validation_rows(issue_rows)
+        else:
+            self.quick_page.validation_cards["total"].set_value("--")
+            self.quick_page.validation_cards["importable"].set_value("--")
+            self.quick_page.validation_cards["skipped"].set_value("--")
+            self.quick_page.validation_cards["blocking"].set_value("--")
+            self.quick_page.validation_status_label.setProperty("badgeTone", "neutral")
+            self.quick_page.validation_status_label.setText("Validação ainda não executada.")
+            self._refresh_widget_style(self.quick_page.validation_status_label)
+            self.quick_page.validation_details.setPlainText(self._last_profile_preview or "")
+            self.quick_page.populate_validation_rows([])
+
+        _refresh_import = self._last_import_result
+        skipped_rows = validation.skipped_rows if validation else 0
+        self.quick_page.result_card.set_result(_refresh_import, skipped_rows=skipped_rows)
+
+        connection_ready = bool(
+            self.db_edit.text().strip() and self.user_edit.text().strip() and self.host_edit.text().strip()
+        )
+        checklist_lines = [
+            f"Modelo aplicado: {'sim' if self.loaded_profile_id else 'nao'}",
+            f"Planilha carregada: {'sim' if self.excel_reader else 'nao'}",
+            f"Conexao configurada: {'sim' if connection_ready else 'nao'}",
+            f"Validacao pronta: {'sim' if validation and validation.can_import else 'nao'}",
+        ]
+        self.quick_page.import_checklist_label.setText("\n".join(checklist_lines))
+        can_import = bool(validation and validation.can_import and connection_ready)
+        self.quick_page.import_btn.setEnabled(can_import)
+        if can_import:
+            self.quick_page.import_status_label.setProperty("badgeTone", "success")
+            self.quick_page.import_status_label.setText("Tudo pronto para importar o lote.")
+            self._refresh_widget_style(self.quick_page.import_status_label)
+        elif validation and validation.can_import and not connection_ready:
+            self.quick_page.import_status_label.setProperty("badgeTone", "warning")
+            self.quick_page.import_status_label.setText("A validacao terminou, mas faltam os dados da conexao.")
+            self._refresh_widget_style(self.quick_page.import_status_label)
+        else:
+            self.quick_page.import_status_label.setProperty("badgeTone", "warning")
+            self.quick_page.import_status_label.setText("Ainda faltam itens obrigatorios antes do envio.")
+            self._refresh_widget_style(self.quick_page.import_status_label)
+
+        self._sync_quick_stepper(applied_profile, validation)
+        self.quick_page.validation_next_btn.setEnabled(bool(validation and validation.can_import))
+
+    def _sync_quick_stepper(
+        self,
+        current_profile: ImportProfile | None,
+        validation: XerifeValidationResult | None,
+    ) -> None:
+        step0_state = "ready" if current_profile else "active"
+        step1_state = "ready" if self.excel_reader and self._excel_step_ready else "pending"
+        step2_state = "pending"
+        step3_state = "pending"
+
+        if validation:
+            if validation.issues:
+                step2_state = "error"
+            elif validation.skipped_rows:
+                step2_state = "warning"
+            else:
+                step2_state = "ready"
+            step3_state = "ready" if self._last_import_result else "warning"
+
+        self.quick_page.stepper.set_step_state(
+            0,
+            title="Modelo",
+            detail=current_profile.name if current_profile else "Selecione e aplique um modelo salvo.",
+            state=step0_state,
+        )
+        self.quick_page.stepper.set_step_state(
+            1,
+            title="Planilha",
+            detail=self.excel_file_path.name if self.excel_file_path else "Escolha o arquivo e confirme a aba.",
+            state=step1_state,
+        )
+        self.quick_page.stepper.set_step_state(
+            2,
+            title="Revisão",
+            detail=(
+                f"{validation.importable_rows} importáveis, {validation.skipped_rows} descartadas."
+                if validation
+                else "Execute a validação do perfil."
+            ),
+            state=step2_state,
+        )
+        self.quick_page.stepper.set_step_state(
+            3,
+            title="Importar",
+            detail=(
+                "Lote já enviado nesta sessão."
+                if self._last_import_result
+                else "Envie o lote após uma validação sem bloqueios."
+            ),
+            state=step3_state,
+        )
+
+    def _build_quick_issue_rows(self, validation: XerifeValidationResult) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
+        for issue in validation.issues[:8]:
+            rows.append((str(issue.row_number), "Bloqueante", issue.code, issue.message))
+        for issue in validation.ignored_issues[:8]:
+            rows.append((str(issue.row_number), "Descartada", issue.code, issue.message))
+        return rows
 
     def _update_step_progress(self) -> None:
         step1 = f"{'[x]' if self._excel_step_ready else '[ ]'} Step 1 - Excel"
@@ -262,15 +703,18 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        connection_group = QGroupBox("Conexão")
-        connection_layout = QHBoxLayout(connection_group)
-        self.connection_btn = QPushButton("Conectar ao banco...")
-        self.connection_btn.clicked.connect(self._open_connection_dialog)
-        connection_layout.addWidget(self.connection_btn)
+        connection_group = QGroupBox("Conexao")
+        connection_layout = QVBoxLayout(connection_group)
+        helper = QLabel(
+            "A conexao principal fica na barra superior. "
+            "Use este painel para confirmar o status e seguir para a escolha da tabela."
+        )
+        helper.setWordWrap(True)
+        connection_layout.addWidget(helper)
 
-        self.connection_status_label = QLabel("Não conectado")
-        self.connection_status_label.setWordWrap(True)
-        connection_layout.addWidget(self.connection_status_label, 1)
+        self.database_status_copy_label = QLabel("Sem conexao ativa.")
+        self.database_status_copy_label.setWordWrap(True)
+        connection_layout.addWidget(self.database_status_copy_label)
         layout.addWidget(connection_group)
 
         layout.addWidget(self._build_database_panel())
@@ -644,10 +1088,13 @@ class MainWindow(QMainWindow):
         )
         if not file_name:
             return
-        self.excel_path_label.setText(file_name)
-        self.excel_file_path = Path(file_name)
+        self._load_excel_file(Path(file_name))
+
+    def _load_excel_file(self, file_path: Path) -> None:
+        self.excel_path_label.setText(str(file_path))
+        self.excel_file_path = file_path
         try:
-            self.excel_reader = ExcelReader(file_name)
+            self.excel_reader = ExcelReader(str(file_path))
             self._relation_conversions = {}
             self._refresh_fk_conversion_hint()
             self.sheet_list.clear()
@@ -661,13 +1108,34 @@ class MainWindow(QMainWindow):
             self.sheet_columns_list.clear()
             self._refresh_fk_excel_options()
             self._clear_pre_validation_state()
+            self._last_validation_result = None
+            self._last_import_result = None
+            target_sheet = None
+            selected_profile_id = self._selected_profile_id()
+            if selected_profile_id:
+                try:
+                    target_sheet = load_profile(selected_profile_id).sheet_name
+                except FileNotFoundError:
+                    target_sheet = None
+            self.sheet_list.blockSignals(True)
+            if target_sheet:
+                matching_items = self.sheet_list.findItems(target_sheet, Qt.MatchExactly)
+                if matching_items:
+                    self.sheet_list.setCurrentItem(matching_items[0])
+            if not self.sheet_list.selectedItems() and self.sheet_list.count() > 0:
+                self.sheet_list.setCurrentRow(0)
+            self.sheet_list.blockSignals(False)
+            if self.sheet_list.selectedItems():
+                self._on_sheet_selected()
             self._update_profile_summary()
+            self._sync_quick_workflow_state()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao abrir Excel", exc)
 
     def _refresh_profile_options(self) -> None:
         current_profile_id = self.profile_combo.currentData() if hasattr(self, "profile_combo") else None
         profiles = list_profiles()
+        self._available_profiles = profiles
         self.profile_combo.clear()
         for profile in profiles:
             self.profile_combo.addItem(profile.name, profile.id)
@@ -677,15 +1145,17 @@ class MainWindow(QMainWindow):
                     self.profile_combo.setCurrentIndex(index)
                     break
         self._update_profile_summary()
+        self._sync_quick_workflow_state()
 
     def _on_profile_combo_changed(self) -> None:
         current_profile_id = self.profile_combo.currentData()
         if self.loaded_profile_id and current_profile_id and str(current_profile_id) != self.loaded_profile_id:
             self.loaded_profile_id = None
         self._update_profile_summary()
+        self._sync_quick_workflow_state()
 
     def _selected_profile_id(self) -> str | None:
-        profile_id = self.loaded_profile_id or self.profile_combo.currentData()
+        profile_id = self.loaded_profile_id or self.profile_combo.currentData() or self._selected_quick_profile_id()
         if not profile_id:
             return None
         return str(profile_id)
@@ -710,6 +1180,8 @@ class MainWindow(QMainWindow):
         self.row_end_spin.setValue(profile.data_end_row or 0)
         self.col_start_spin.setValue(profile.col_start or 1)
         self.col_end_spin.setValue(profile.col_end or 0)
+        self._last_validation_result = None
+        self._last_import_result = None
 
         if self.excel_reader:
             matching_items = self.sheet_list.findItems(profile.sheet_name, Qt.MatchExactly)
@@ -717,6 +1189,7 @@ class MainWindow(QMainWindow):
                 self.sheet_list.setCurrentItem(matching_items[0])
             self._refresh_sheet_preview()
         self._update_profile_summary(profile)
+        self._sync_quick_workflow_state()
 
     def _build_profile_from_ui(self) -> ImportProfile | None:
         profile_id = self.profile_id_edit.text().strip()
@@ -802,51 +1275,73 @@ class MainWindow(QMainWindow):
             "mode": "online",
         }
 
-    def _validate_and_import_profile(self) -> None:
+    def _validate_profile(self, *, show_blocking_dialog: bool = False) -> XerifeValidationResult | None:
         if not self.excel_reader:
             QMessageBox.warning(self, "Importacao", "Escolha a planilha antes de validar o modelo.")
-            return
+            return None
         profile = self._build_profile_from_ui()
         if not profile:
-            return
+            return None
         if profile.target_type != "xerife_stock":
             QMessageBox.warning(self, "Importacao", f"Alvo rapido nao suportado: {profile.target_type}")
-            return
-
-        connection = self._connection_payload()
-        if connection is None:
-            return
+            return None
 
         try:
             validation = XerifeStockImporter(self.excel_reader, profile).validate()
-            self.preview_text.setPlainText(validation.preview_text())
+            self._last_validation_result = validation
+            self._last_import_result = None
             self._last_profile_preview = validation.preview_text()
+            self.preview_text.setPlainText(validation.preview_text())
             self._update_profile_summary(profile)
-            if validation.issues:
+            self._sync_quick_workflow_state()
+            if validation.issues and show_blocking_dialog:
                 QMessageBox.warning(
                     self,
                     "Validacao",
                     f"Foram encontrados {len(validation.issues)} erro(s) bloqueantes. Corrija-os antes de importar.",
                 )
-                return
-            confirmation_lines = [f"Enviar {validation.importable_rows} item(ns) validados para o Xerife?"]
-            if validation.skipped_rows:
-                confirmation_lines.append(
-                    f"{validation.skipped_rows} linha(s) serao descartadas pelas regras do perfil e nao serao importadas."
-                )
-            confirmation = QMessageBox.question(
-                self,
-                "Importar para o Xerife",
-                "\n".join(confirmation_lines),
-            )
-            if confirmation != QMessageBox.Yes:
-                return
+            return validation
+        except Exception as exc:  # noqa: BLE001
+            self._show_error("Erro ao validar o perfil do Xerife", exc)
+            return None
 
+    def _validate_profile_only(self) -> None:
+        validation = self._validate_profile(show_blocking_dialog=False)
+        if validation is None:
+            return
+        self.quick_page.set_step(2)
+
+    def _import_validated_profile(self, *, show_summary_dialog: bool = False) -> None:
+        validation = self._last_validation_result
+        if validation is None:
+            validation = self._validate_profile(show_blocking_dialog=False)
+        if validation is None:
+            return
+        if validation.issues:
+            self.quick_page.set_step(2)
+            return
+
+        connection = self._connection_payload()
+        if connection is None:
+            self.quick_page.set_step(3)
+            return
+
+        confirmation_lines = [f"Enviar {validation.importable_rows} item(ns) validados para o Xerife?"]
+        if validation.skipped_rows:
+            confirmation_lines.append(
+                f"{validation.skipped_rows} linha(s) serao descartadas pelas regras do perfil e nao serao importadas."
+            )
+        confirmation = QMessageBox.question(self, "Importar para o Xerife", "\n".join(confirmation_lines))
+        if confirmation != QMessageBox.Yes:
+            return
+
+        try:
             result = run_xerife_stock_batch(
                 connection=connection,
                 items=validation.prepared_items,
                 run_id=uuid4().hex[:12],
             )
+            self._last_import_result = result
             result_lines = [
                 validation.preview_text(),
                 "",
@@ -858,18 +1353,29 @@ class MainWindow(QMainWindow):
             result_items = result.get("items", [])
             if result_items:
                 result_lines.extend(["", pd.DataFrame(result_items[:20]).to_string(index=False)])
-            self.preview_text.setPlainText("\n".join(result_lines))
-            QMessageBox.information(
-                self,
-                "Importacao",
-                (
-                    f"Importacao concluida.\nCriados: {result.get('created', 0)}\n"
-                    f"Atualizados: {result.get('updated', 0)}\n"
-                    f"Descartados pelo perfil: {validation.skipped_rows}"
-                ),
-            )
+            result_text = "\n".join(result_lines)
+            self.preview_text.setPlainText(result_text)
+            self.quick_page.validation_details.setPlainText(result_text)
+            self.quick_page.set_step(3)
+            self._sync_quick_workflow_state()
+            if show_summary_dialog:
+                QMessageBox.information(
+                    self,
+                    "Importacao",
+                    (
+                        f"Importacao concluida.\nCriados: {result.get('created', 0)}\n"
+                        f"Atualizados: {result.get('updated', 0)}\n"
+                        f"Descartados pelo perfil: {validation.skipped_rows}"
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao importar para o Xerife", exc)
+
+    def _validate_and_import_profile(self) -> None:
+        validation = self._validate_profile(show_blocking_dialog=True)
+        if not validation or not validation.can_import:
+            return
+        self._import_validated_profile(show_summary_dialog=True)
 
     def _update_profile_summary(self, profile: ImportProfile | None = None) -> None:
         current_profile = profile
@@ -887,6 +1393,7 @@ class MainWindow(QMainWindow):
         else:
             summary = f"Sem modelo aplicado | arquivo={file_text}"
         self.profile_summary_label.setText(summary)
+        self._sync_quick_workflow_state()
 
     def _open_connection_dialog(self) -> None:
         dialog = QDialog(self)
@@ -933,13 +1440,19 @@ class MainWindow(QMainWindow):
             self._foreign_columns_cache = {}
             self._load_tables()
             connection_text = f"Conectado: {user or 'usuário'}@{host}:{port}/{database}"
-            self.connection_status_label.setText(connection_text)
+            self._set_connection_status(connection_text, connected=True)
+            if hasattr(self, "database_status_copy_label"):
+                self.database_status_copy_label.setText(connection_text)
+            self._sync_quick_workflow_state()
             QMessageBox.information(self, "Banco", "Conexão realizada com sucesso")
             return True
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao conectar", exc)
-            self.connection_status_label.setText("Erro ao conectar")
+            self._set_connection_status("Erro ao conectar", connected=False, tone="danger")
+            if hasattr(self, "database_status_copy_label"):
+                self.database_status_copy_label.setText("Erro ao conectar")
             self._set_db_step_ready(False)
+            self._sync_quick_workflow_state()
             return False
 
     def _load_tables(self) -> None:
@@ -962,9 +1475,11 @@ class MainWindow(QMainWindow):
     def _refresh_sheet_preview(self) -> None:
         self._set_excel_step_ready(False)
         if not self.excel_reader:
+            self._sync_quick_workflow_state()
             return
         items = self.sheet_list.selectedItems()
         if not items:
+            self._sync_quick_workflow_state()
             return
         sheet_name = items[0].text()
         col_start = self.col_start_spin.value()
@@ -996,6 +1511,9 @@ class MainWindow(QMainWindow):
                 self.sheet_columns_list.addItem(col)
             self._refresh_fk_excel_options()
             self._set_excel_step_ready(True)
+            self._last_validation_result = None
+            self._last_import_result = None
+            self._sync_quick_workflow_state()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao pre-visualizar", exc)
 
@@ -1032,6 +1550,7 @@ class MainWindow(QMainWindow):
             self.sheet_preview_table.setRowCount(0)
             self.sheet_preview_table.setColumnCount(0)
             self.selection_info_label.setText("Nenhum dado no intervalo atual. Ajuste cabecalho/colunas.")
+            self._populate_quick_preview_table(df, preview.columns, first_data_row)
             return
 
         self.sheet_preview_table.setRowCount(total_rows)
@@ -1051,6 +1570,30 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(True)
         self.sheet_preview_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._update_selection_info()
+        self._populate_quick_preview_table(df, preview.columns, first_data_row)
+
+    def _populate_quick_preview_table(self, df: pd.DataFrame, columns: list[str], first_data_row: int) -> None:
+        if not hasattr(self, "quick_page"):
+            return
+        table = self.quick_page.quick_preview_table
+        sample = df.head(8)
+        table.clear()
+        if sample.empty:
+            table.setRowCount(0)
+            table.setColumnCount(0)
+            return
+        table.setRowCount(len(sample.index))
+        table.setColumnCount(len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        row_labels = [str(first_data_row + idx) for idx in range(len(sample.index))]
+        table.setVerticalHeaderLabels(row_labels)
+        for row_idx, (_, row) in enumerate(sample.iterrows(), start=0):
+            for col_idx, value in enumerate(row):
+                table.setItem(row_idx, col_idx, QTableWidgetItem("" if value is None else str(value)))
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
 
     def _apply_selection_to_range(self) -> None:
         ranges = self.sheet_preview_table.selectedRanges()
