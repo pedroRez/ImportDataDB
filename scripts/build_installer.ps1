@@ -18,6 +18,7 @@ $pyInstallerArgs = @(
     '--name', 'ImportDataDB',
     '--paths', $projectRoot,
     '--paths', (Join-Path $projectRoot 'src'),
+    '--add-data', ((Join-Path $projectRoot 'profiles') + ';profiles'),
     'app/__main__.py'
 )
 

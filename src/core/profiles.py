@@ -1,13 +1,44 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-PROFILE_DIR = ROOT_DIR / "profiles"
+APP_DIR_NAME = "ImportDataDB"
+
+
+def _bundled_root_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        bundle_dir = getattr(sys, "_MEIPASS", None)
+        if bundle_dir:
+            return Path(bundle_dir)
+        return Path(sys.executable).resolve().parent
+    return ROOT_DIR
+
+
+def _user_data_root() -> Path:
+    custom_dir = os.environ.get("IMPORTDATADB_PROFILE_DIR")
+    if custom_dir:
+        return Path(custom_dir)
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / APP_DIR_NAME
+        return Path.home() / "AppData" / "Roaming" / APP_DIR_NAME
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home) / APP_DIR_NAME
+    return Path.home() / ".local" / "share" / APP_DIR_NAME
+
+
+BUNDLED_PROFILE_DIR = _bundled_root_dir() / "profiles"
+PROFILE_DIR = _user_data_root() / "profiles" if getattr(sys, "frozen", False) else ROOT_DIR / "profiles"
 
 
 @dataclass
@@ -87,7 +118,23 @@ def _optional_str(value: Any) -> Optional[str]:
 
 def ensure_profile_dir() -> Path:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    _sync_default_profiles(PROFILE_DIR)
     return PROFILE_DIR
+
+
+def _sync_default_profiles(target_dir: Path) -> None:
+    source_dir = BUNDLED_PROFILE_DIR
+    if not source_dir.exists():
+        return
+    try:
+        if source_dir.resolve() == target_dir.resolve():
+            return
+    except FileNotFoundError:
+        return
+    for source_path in sorted(source_dir.glob("*.json")):
+        target_path = target_dir / source_path.name
+        if not target_path.exists():
+            shutil.copy2(source_path, target_path)
 
 
 def list_profiles() -> List[ImportProfile]:
