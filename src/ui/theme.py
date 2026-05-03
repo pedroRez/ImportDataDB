@@ -123,7 +123,7 @@ def build_app_stylesheet() -> str:
         font-weight: 600;
     }
 
-    QToolButton[modeButton="true"][checked="true"] {
+    QToolButton[modeButton="true"]:checked {
         background: #0f4c81;
         color: #ffffff;
         border-color: #0f4c81;
@@ -134,6 +134,7 @@ def build_app_stylesheet() -> str:
     QSpinBox,
     QDateEdit,
     QListWidget,
+    QTableView,
     QTableWidget,
     QTextEdit {
         background: #ffffff;
@@ -149,6 +150,7 @@ def build_app_stylesheet() -> str:
     QSpinBox:focus,
     QDateEdit:focus,
     QListWidget:focus,
+    QTableView:focus,
     QTableWidget:focus,
     QTextEdit:focus {
         border-color: #0f4c81;
@@ -173,6 +175,7 @@ def build_app_stylesheet() -> str:
         font-weight: 600;
     }
 
+    QTableView,
     QTableWidget {
         gridline-color: #e8edf3;
     }
@@ -180,6 +183,40 @@ def build_app_stylesheet() -> str:
     QScrollArea {
         border: none;
         background: transparent;
+    }
+
+    QScrollBar:vertical {
+        background: #edf2f7;
+        width: 12px;
+        margin: 0;
+        border-radius: 6px;
+    }
+
+    QScrollBar::handle:vertical {
+        background: #bfd0e2;
+        min-height: 36px;
+        border-radius: 6px;
+    }
+
+    QScrollBar:horizontal {
+        background: #edf2f7;
+        height: 12px;
+        margin: 0;
+        border-radius: 6px;
+    }
+
+    QScrollBar::handle:horizontal {
+        background: #bfd0e2;
+        min-width: 36px;
+        border-radius: 6px;
+    }
+
+    QScrollBar::add-line,
+    QScrollBar::sub-line,
+    QScrollBar::add-page,
+    QScrollBar::sub-page {
+        background: transparent;
+        border: none;
     }
 
     QLabel[badgeTone="neutral"],
@@ -215,6 +252,22 @@ def build_app_stylesheet() -> str:
         background: #ffffff;
         border: 1px solid #d8e0ea;
         border-radius: 14px;
+    }
+
+    QFrame[workspaceShell="true"] {
+        background: #ffffff;
+    }
+
+    QFrame[dropZone="true"] {
+        border-style: dashed;
+        border-width: 2px;
+        border-color: #b7c7d8;
+        background: #fbfdff;
+    }
+
+    QFrame[stageSlot="true"] {
+        background: transparent;
+        border: none;
     }
 
     QFrame[stepState="active"] {

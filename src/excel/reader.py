@@ -131,6 +131,24 @@ class ExcelReader:
         preview = SheetPreview(name=sheet_name, columns=columns, sample=df.head(30), header_row=header_row)
         return preview
 
+    def load_sheet_dataframe(
+        self,
+        sheet_name: str,
+        header_row: int,
+        data_start_row: Optional[int] = None,
+        data_end_row: Optional[int] = None,
+        col_start: Optional[int] = None,
+        col_end: Optional[int] = None,
+    ) -> pd.DataFrame:
+        return self._read_dataframe(
+            sheet_name,
+            header_row=header_row,
+            data_start_row=data_start_row,
+            data_end_row=data_end_row,
+            col_start=col_start,
+            col_end=col_end,
+        )
+
     def read_records(
         self,
         sheet_name: str,

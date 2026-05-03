@@ -23,13 +23,16 @@ def run_xerife_stock_batch(*, connection: Dict[str, Any], items: List[Dict[str, 
     }
 
     temp_path: Path | None = None
+    result_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=True)
             temp_path = Path(handle.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".result.json", delete=False, encoding="utf-8") as handle:
+            result_path = Path(handle.name)
 
         completed = subprocess.run(
-            ["node", str(DEFAULT_BRIDGE_SCRIPT), str(temp_path)],
+            ["node", str(DEFAULT_BRIDGE_SCRIPT), str(temp_path), str(result_path)],
             cwd=DEFAULT_XERIFE_ROOT,
             capture_output=True,
             text=True,
@@ -38,10 +41,15 @@ def run_xerife_stock_batch(*, connection: Dict[str, Any], items: List[Dict[str, 
             check=False,
         )
 
-        output = (completed.stdout or "").strip()
+        output = result_path.read_text(encoding="utf-8").strip() if result_path and result_path.exists() else ""
         if not output:
+            stdout = (completed.stdout or "").strip()
             stderr = (completed.stderr or "").strip()
-            raise RuntimeError(stderr or "The Xerife bridge did not return any output.")
+            fallback = stdout.splitlines()[-1].strip() if stdout else ""
+            if fallback.startswith("{") and fallback.endswith("}"):
+                output = fallback
+            else:
+                raise RuntimeError(stderr or stdout or "The Xerife bridge did not return any machine-readable result.")
 
         data = json.loads(output)
         if completed.returncode != 0 or not data.get("success", False):
@@ -51,3 +59,5 @@ def run_xerife_stock_batch(*, connection: Dict[str, Any], items: List[Dict[str, 
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink(missing_ok=True)
+        if result_path is not None and result_path.exists():
+            result_path.unlink(missing_ok=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -11,8 +11,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QComboBox,
-    QSizePolicy,
+    QScrollArea,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -31,15 +30,43 @@ def _refresh_widget_style(widget: QWidget) -> None:
 
 class ConnectionStatusBadge(QLabel):
     def __init__(self) -> None:
-        super().__init__("Sem conexão")
+        super().__init__("Sem conexao")
         self.setWordWrap(True)
-        self.set_status(False, "Sem conexão")
+        self.set_status(False, "Sem conexao")
 
     def set_status(self, connected: bool, text: str, *, tone: str | None = None) -> None:
         badge_tone = tone or ("success" if connected else "warning")
         self.setProperty("badgeTone", badge_tone)
         self.setText(text)
         _refresh_widget_style(self)
+
+
+class QuickStateCard(QFrame):
+    def __init__(self, title: str, empty_value: str) -> None:
+        super().__init__()
+        self.setProperty("card", True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+
+        title_label = QLabel(title)
+        title_label.setProperty("role", "eyebrow")
+        layout.addWidget(title_label)
+
+        self.value_label = QLabel(empty_value)
+        self.value_label.setProperty("role", "card-title")
+        self.value_label.setWordWrap(True)
+        layout.addWidget(self.value_label)
+
+        self.detail_label = QLabel("")
+        self.detail_label.setProperty("role", "muted")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+    def set_content(self, value: str, detail: str = "") -> None:
+        self.value_label.setText(value)
+        self.detail_label.setText(detail)
 
 
 class ValidationSummaryCard(QFrame):
@@ -81,7 +108,7 @@ class ImportResultCard(QFrame):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
 
-        title = QLabel("Resultado da importação")
+        title = QLabel("Resultado da importacao")
         title.setProperty("role", "card-title")
         layout.addWidget(title)
 
@@ -90,8 +117,8 @@ class ImportResultCard(QFrame):
         stats_layout.setVerticalSpacing(14)
 
         self.cards = {
-            "created": ValidationSummaryCard("Criados", "0", "Novos itens incluídos."),
-            "updated": ValidationSummaryCard("Atualizados", "0", "Itens já existentes atualizados."),
+            "created": ValidationSummaryCard("Criados", "0", "Novos itens incluidos."),
+            "updated": ValidationSummaryCard("Atualizados", "0", "Itens ja existentes atualizados."),
             "adjusted": ValidationSummaryCard("Ajustados", "0", "Registros com saldo ajustado."),
             "discarded": ValidationSummaryCard("Descartados", "0", "Linhas ignoradas pelas regras."),
         }
@@ -101,16 +128,16 @@ class ImportResultCard(QFrame):
         stats_layout.addWidget(self.cards["discarded"], 1, 1)
         layout.addLayout(stats_layout)
 
-        self.summary_label = QLabel("Nenhuma importação executada nesta sessão.")
+        self.summary_label = QLabel("Nenhuma importacao executada nesta sessao.")
         self.summary_label.setWordWrap(True)
         self.summary_label.setProperty("role", "muted")
         layout.addWidget(self.summary_label)
 
     def set_result(self, result: dict[str, int] | None, *, skipped_rows: int = 0) -> None:
         if not result:
-            for key, card in self.cards.items():
+            for card in self.cards.values():
                 card.set_value("0", tone="neutral")
-            self.summary_label.setText("Nenhuma importação executada nesta sessão.")
+            self.summary_label.setText("Nenhuma importacao executada nesta sessao.")
             return
 
         self.cards["created"].set_value(str(result.get("created", 0)), tone="success")
@@ -118,71 +145,23 @@ class ImportResultCard(QFrame):
         self.cards["adjusted"].set_value(str(result.get("adjusted", 0)), tone="warning")
         self.cards["discarded"].set_value(str(skipped_rows), tone="warning")
         self.summary_label.setText(
-            "Importação concluída com lote processado no Xerife. "
-            f"Descartes do perfil nesta execução: {skipped_rows}."
+            "Importacao concluida com lote processado no Xerife. "
+            f"Descartes do perfil nesta execucao: {skipped_rows}."
         )
 
 
-class FileDropArea(QFrame):
-    fileDropped = Signal(str)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setProperty("card", True)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(10)
-
-        title = QLabel("Arraste a planilha aqui")
-        title.setProperty("role", "card-title")
-        layout.addWidget(title, alignment=Qt.AlignCenter)
-
-        subtitle = QLabel("Ou escolha o arquivo manualmente. São aceitos .xls, .xlsx e .xlsm.")
-        subtitle.setWordWrap(True)
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setProperty("role", "muted")
-        layout.addWidget(subtitle)
-
-        self.select_button = QPushButton("Escolher planilha")
-        self.select_button.setProperty("variant", "primary")
-        layout.addWidget(self.select_button, alignment=Qt.AlignCenter)
-
-    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        urls = event.mimeData().urls()
-        if urls and urls[0].isLocalFile():
-            event.acceptProposedAction()
-            return
-        event.ignore()
-
-    def dropEvent(self, event) -> None:  # type: ignore[override]
-        urls = event.mimeData().urls()
-        if not urls:
-            event.ignore()
-            return
-        local_file = urls[0].toLocalFile()
-        if local_file:
-            self.fileDropped.emit(local_file)
-            event.acceptProposedAction()
-            return
-        event.ignore()
-
-
 class QuickImportStepper(QWidget):
-    stepRequested = Signal(int)
-
     def __init__(self, steps: Iterable[str]) -> None:
         super().__init__()
         self._frames: list[QFrame] = []
         self._markers: list[QLabel] = []
         self._titles: list[QLabel] = []
         self._details: list[QLabel] = []
+        self._buttons: list[QToolButton] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         for index, title in enumerate(steps):
             frame = QFrame()
@@ -190,8 +169,8 @@ class QuickImportStepper(QWidget):
             frame.setProperty("stepState", "pending")
 
             row = QHBoxLayout(frame)
-            row.setContentsMargins(16, 16, 16, 16)
-            row.setSpacing(12)
+            row.setContentsMargins(14, 14, 14, 14)
+            row.setSpacing(10)
 
             marker = QLabel(str(index + 1))
             marker.setProperty("stepMarker", True)
@@ -204,8 +183,9 @@ class QuickImportStepper(QWidget):
             button.setText(title)
             button.setToolButtonStyle(Qt.ToolButtonTextOnly)
             button.setAutoRaise(True)
-            button.clicked.connect(lambda _checked=False, step=index: self.stepRequested.emit(step))
-            button.setStyleSheet("text-align: left; font-weight: 600; padding: 0; border: none; background: transparent;")
+            button.setStyleSheet(
+                "text-align: left; font-weight: 600; padding: 0; border: none; background: transparent;"
+            )
             text_column.addWidget(button, alignment=Qt.AlignLeft)
 
             detail = QLabel("Aguardando.")
@@ -220,8 +200,13 @@ class QuickImportStepper(QWidget):
             self._markers.append(marker)
             self._titles.append(button)
             self._details.append(detail)
+            self._buttons.append(button)
 
         layout.addStretch()
+
+    @property
+    def buttons(self) -> list[QToolButton]:
+        return self._buttons
 
     def set_step_state(self, step: int, *, title: str, detail: str, state: str) -> None:
         self._titles[step].setText(title)
@@ -229,11 +214,11 @@ class QuickImportStepper(QWidget):
         self._frames[step].setProperty("stepState", state)
         marker_text = str(step + 1)
         if state == "ready":
-            marker_text = "✓"
+            marker_text = "OK"
         elif state == "warning":
             marker_text = "!"
         elif state == "error":
-            marker_text = "×"
+            marker_text = "X"
         self._markers[step].setText(marker_text)
         _refresh_widget_style(self._frames[step])
         _refresh_widget_style(self._markers[step])
@@ -253,66 +238,93 @@ class QuickImportStepper(QWidget):
             _refresh_widget_style(self._markers[index])
 
 
+class StageScrollArea(QScrollArea):
+    def __init__(self, content: QWidget) -> None:
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QScrollArea.NoFrame)
+        self.setWidget(content)
+
+
 class QuickImportPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(24, 24, 24, 24)
-        main_layout.setSpacing(24)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(18)
 
         left_column = QFrame()
         left_column.setProperty("card", True)
         left_layout = QVBoxLayout(left_column)
-        left_layout.setContentsMargins(20, 20, 20, 20)
-        left_layout.setSpacing(16)
+        left_layout.setContentsMargins(18, 18, 18, 18)
+        left_layout.setSpacing(14)
 
-        stepper_title = QLabel("Fluxo rápido")
+        stepper_title = QLabel("Fluxo rapido")
         stepper_title.setProperty("role", "card-title")
         left_layout.addWidget(stepper_title)
 
-        self.stepper = QuickImportStepper(["Modelo", "Planilha", "Revisão", "Importar"])
+        self.stepper = QuickImportStepper(["Modelo", "Planilha", "Revisao", "Importar"])
         left_layout.addWidget(self.stepper, 1)
 
-        self.connection_hint = QLabel("Conexão com o Xerife pendente.")
+        self.connection_hint = QLabel("Conexao com o Xerife pendente.")
         self.connection_hint.setWordWrap(True)
         self.connection_hint.setProperty("role", "muted")
         left_layout.addWidget(self.connection_hint)
 
-        left_column.setMaximumWidth(320)
+        left_column.setMaximumWidth(260)
         main_layout.addWidget(left_column, 0)
 
-        self.cards_stack = QStackedWidget()
-        self.cards_stack.addWidget(self._build_model_card())
-        self.cards_stack.addWidget(self._build_spreadsheet_card())
-        self.cards_stack.addWidget(self._build_validation_card())
-        self.cards_stack.addWidget(self._build_import_card())
-        main_layout.addWidget(self.cards_stack, 1)
+        right_column = QVBoxLayout()
+        right_column.setSpacing(16)
 
-    def _build_model_card(self) -> QWidget:
+        summary_row = QHBoxLayout()
+        summary_row.setSpacing(12)
+        self.model_state_card = QuickStateCard("Modelo aplicado", "Nenhum modelo")
+        self.file_state_card = QuickStateCard("Arquivo atual", "Nenhuma planilha")
+        self.selection_state_card = QuickStateCard("Recorte confirmado", "Nenhum recorte")
+        summary_row.addWidget(self.model_state_card, 1)
+        summary_row.addWidget(self.file_state_card, 1)
+        summary_row.addWidget(self.selection_state_card, 1)
+        right_column.addLayout(summary_row)
+
+        self.cards_stack = QStackedWidget()
+        self.cards_stack.addWidget(self._build_model_stage())
+        self.cards_stack.addWidget(self._build_spreadsheet_stage())
+        self.cards_stack.addWidget(self._build_validation_stage())
+        self.cards_stack.addWidget(self._build_import_stage())
+        right_column.addWidget(self.cards_stack, 1)
+
+        main_layout.addLayout(right_column, 1)
+
+    def _wrap_stage(self, card: QWidget) -> QWidget:
+        scroll = StageScrollArea(card)
+        scroll.setProperty("stageScroll", True)
+        return scroll
+
+    def _build_model_stage(self) -> QWidget:
         card = QFrame()
         card.setProperty("card", True)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(28, 28, 28, 28)
-        layout.setSpacing(18)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
 
         eyebrow = QLabel("Etapa 1")
         eyebrow.setProperty("role", "eyebrow")
         layout.addWidget(eyebrow)
 
         title = QLabel("Escolha um modelo salvo")
-        title.setProperty("role", "title")
+        title.setProperty("role", "section-title")
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Selecione o perfil que já conhece a estrutura da planilha e o alvo do Xerife. "
-            "O modo avançado continua disponível para ajustes técnicos."
+            "Selecione o perfil que ja conhece a estrutura da planilha e o alvo do Xerife."
         )
         subtitle.setWordWrap(True)
         subtitle.setProperty("role", "muted")
         layout.addWidget(subtitle)
 
         self.profile_list = QListWidget()
-        self.profile_list.setMinimumHeight(240)
+        self.profile_list.setMinimumHeight(220)
         layout.addWidget(self.profile_list, 1)
 
         self.profile_detail_label = QLabel("Nenhum modelo aplicado.")
@@ -325,7 +337,7 @@ class QuickImportPage(QWidget):
         self.use_profile_btn.setProperty("variant", "primary")
         actions.addWidget(self.use_profile_btn)
 
-        self.new_profile_btn = QPushButton("Novo modelo")
+        self.new_profile_btn = QPushButton("Editar no modo avancado")
         self.new_profile_btn.setProperty("variant", "ghost")
         actions.addWidget(self.new_profile_btn)
         actions.addStretch()
@@ -334,37 +346,33 @@ class QuickImportPage(QWidget):
         self.model_next_btn = QPushButton("Continuar para planilha")
         self.model_next_btn.setProperty("variant", "primary")
         layout.addWidget(self.model_next_btn, alignment=Qt.AlignRight)
+        layout.addStretch()
+        return self._wrap_stage(card)
 
-        return card
-
-    def _build_spreadsheet_card(self) -> QWidget:
+    def _build_spreadsheet_stage(self) -> QWidget:
         card = QFrame()
         card.setProperty("card", True)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(28, 28, 28, 28)
-        layout.setSpacing(18)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
 
         eyebrow = QLabel("Etapa 2")
         eyebrow.setProperty("role", "eyebrow")
         layout.addWidget(eyebrow)
 
-        title = QLabel("Selecione a planilha")
-        title.setProperty("role", "title")
+        title = QLabel("Confirme os dados do Excel")
+        title.setProperty("role", "section-title")
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Use a faixa configurada no perfil e confirme a aba. "
-            "Se precisar mexer em cabeçalho ou colunas, faça isso no modo avançado."
+            "Abra a janela do Excel, escolha a aba correta e confirme o bloco que sera importado."
         )
         subtitle.setWordWrap(True)
         subtitle.setProperty("role", "muted")
         layout.addWidget(subtitle)
 
-        self.file_drop = FileDropArea()
-        layout.addWidget(self.file_drop)
-
         info_grid = QGridLayout()
-        info_grid.setHorizontalSpacing(16)
+        info_grid.setHorizontalSpacing(14)
         info_grid.setVerticalSpacing(12)
 
         info_grid.addWidget(QLabel("Arquivo"), 0, 0)
@@ -373,48 +381,56 @@ class QuickImportPage(QWidget):
         info_grid.addWidget(self.file_name_label, 0, 1)
 
         info_grid.addWidget(QLabel("Aba"), 1, 0)
-        self.quick_sheet_combo = QComboBox()
-        info_grid.addWidget(self.quick_sheet_combo, 1, 1)
+        self.sheet_name_label = QLabel("Nenhuma aba confirmada.")
+        self.sheet_name_label.setWordWrap(True)
+        info_grid.addWidget(self.sheet_name_label, 1, 1)
 
-        info_grid.addWidget(QLabel("Faixa aplicada"), 2, 0)
-        self.range_summary_label = QLabel("Aguardando modelo e planilha.")
+        info_grid.addWidget(QLabel("Recorte"), 2, 0)
+        self.range_summary_label = QLabel("Nenhum recorte confirmado.")
         self.range_summary_label.setWordWrap(True)
         info_grid.addWidget(self.range_summary_label, 2, 1)
-
         layout.addLayout(info_grid)
 
-        self.quick_preview_table = QTableWidget()
-        self.quick_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.quick_preview_table.setAlternatingRowColors(True)
-        self.quick_preview_table.setMinimumHeight(220)
-        layout.addWidget(self.quick_preview_table, 1)
+        self.spreadsheet_status_label = QLabel("Abra o seletor do Excel para confirmar a planilha.")
+        self.spreadsheet_status_label.setProperty("badgeTone", "neutral")
+        self.spreadsheet_status_label.setWordWrap(True)
+        layout.addWidget(self.spreadsheet_status_label, alignment=Qt.AlignLeft)
+
+        action_row = QHBoxLayout()
+        self.open_selection_btn = QPushButton("Abrir seletor do Excel")
+        self.open_selection_btn.setProperty("variant", "primary")
+        action_row.addWidget(self.open_selection_btn)
+
+        self.reopen_file_btn = QPushButton("Trocar planilha")
+        action_row.addWidget(self.reopen_file_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
 
         actions = QHBoxLayout()
         self.spreadsheet_back_btn = QPushButton("Voltar")
         actions.addWidget(self.spreadsheet_back_btn)
-        self.refresh_preview_btn = QPushButton("Atualizar prévia")
-        actions.addWidget(self.refresh_preview_btn)
         actions.addStretch()
-        self.spreadsheet_next_btn = QPushButton("Continuar para revisão")
+        self.spreadsheet_next_btn = QPushButton("Continuar para revisao")
         self.spreadsheet_next_btn.setProperty("variant", "primary")
         actions.addWidget(self.spreadsheet_next_btn)
         layout.addLayout(actions)
 
-        return card
+        layout.addStretch()
+        return self._wrap_stage(card)
 
-    def _build_validation_card(self) -> QWidget:
+    def _build_validation_stage(self) -> QWidget:
         card = QFrame()
         card.setProperty("card", True)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(28, 28, 28, 28)
-        layout.setSpacing(18)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
 
         eyebrow = QLabel("Etapa 3")
         eyebrow.setProperty("role", "eyebrow")
         layout.addWidget(eyebrow)
 
         title = QLabel("Revise e valide")
-        title.setProperty("role", "title")
+        title.setProperty("role", "section-title")
         layout.addWidget(title)
 
         subtitle = QLabel(
@@ -429,7 +445,7 @@ class QuickImportPage(QWidget):
         cards_grid.setVerticalSpacing(14)
         self.validation_cards = {
             "total": ValidationSummaryCard("Linhas lidas", "--", "Total bruto da faixa selecionada."),
-            "importable": ValidationSummaryCard("Importáveis", "--", "Itens prontos para envio."),
+            "importable": ValidationSummaryCard("Importaveis", "--", "Itens prontos para envio."),
             "skipped": ValidationSummaryCard("Descartadas", "--", "Ignoradas pelas regras do perfil."),
             "blocking": ValidationSummaryCard("Erros bloqueantes", "--", "Impedem o envio do lote."),
         }
@@ -439,17 +455,17 @@ class QuickImportPage(QWidget):
         cards_grid.addWidget(self.validation_cards["blocking"], 1, 1)
         layout.addLayout(cards_grid)
 
-        self.validation_status_label = QLabel("Validação ainda não executada.")
+        self.validation_status_label = QLabel("Validacao ainda nao executada.")
         self.validation_status_label.setWordWrap(True)
         self.validation_status_label.setProperty("badgeTone", "neutral")
         layout.addWidget(self.validation_status_label, alignment=Qt.AlignLeft)
 
         self.validation_table = QTableWidget(0, 4)
-        self.validation_table.setHorizontalHeaderLabels(["Linha", "Status", "Código", "Mensagem"])
+        self.validation_table.setHorizontalHeaderLabels(["Linha", "Status", "Codigo", "Mensagem"])
         self.validation_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.validation_table.setAlternatingRowColors(True)
         self.validation_table.verticalHeader().setVisible(False)
-        self.validation_table.setMinimumHeight(220)
+        self.validation_table.setMinimumHeight(180)
         layout.addWidget(self.validation_table, 1)
 
         detail_row = QHBoxLayout()
@@ -464,7 +480,7 @@ class QuickImportPage(QWidget):
         self.validation_details = QTextEdit()
         self.validation_details.setReadOnly(True)
         self.validation_details.setVisible(False)
-        self.validation_details.setMinimumHeight(160)
+        self.validation_details.setMinimumHeight(150)
         layout.addWidget(self.validation_details)
 
         actions = QHBoxLayout()
@@ -475,26 +491,25 @@ class QuickImportPage(QWidget):
         self.validation_next_btn.setProperty("variant", "primary")
         actions.addWidget(self.validation_next_btn)
         layout.addLayout(actions)
+        return self._wrap_stage(card)
 
-        return card
-
-    def _build_import_card(self) -> QWidget:
+    def _build_import_stage(self) -> QWidget:
         card = QFrame()
         card.setProperty("card", True)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(28, 28, 28, 28)
-        layout.setSpacing(18)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
 
         eyebrow = QLabel("Etapa 4")
         eyebrow.setProperty("role", "eyebrow")
         layout.addWidget(eyebrow)
 
         title = QLabel("Importe para o Xerife")
-        title.setProperty("role", "title")
+        title.setProperty("role", "section-title")
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "O lote só é enviado quando houver conexão ativa e uma validação sem erros bloqueantes."
+            "O lote so e enviado quando houver conexao ativa e uma validacao sem erros bloqueantes."
         )
         subtitle.setWordWrap(True)
         subtitle.setProperty("role", "muted")
@@ -504,7 +519,7 @@ class QuickImportPage(QWidget):
         self.import_checklist_label.setWordWrap(True)
         layout.addWidget(self.import_checklist_label)
 
-        self.import_status_label = QLabel("Aguardando validação.")
+        self.import_status_label = QLabel("Aguardando validacao.")
         self.import_status_label.setProperty("badgeTone", "neutral")
         layout.addWidget(self.import_status_label, alignment=Qt.AlignLeft)
 
@@ -520,8 +535,7 @@ class QuickImportPage(QWidget):
         actions.addWidget(self.import_back_btn)
         actions.addStretch()
         layout.addLayout(actions)
-
-        return card
+        return self._wrap_stage(card)
 
     def set_step(self, step: int) -> None:
         self.cards_stack.setCurrentIndex(step)
@@ -564,3 +578,12 @@ class QuickImportPage(QWidget):
                 self.validation_table.setItem(row_index, column_index, QTableWidgetItem(value))
         self.validation_table.resizeColumnsToContents()
         self.validation_table.horizontalHeader().setStretchLastSection(True)
+
+    def set_model_status(self, value: str, detail: str) -> None:
+        self.model_state_card.set_content(value, detail)
+
+    def set_file_status(self, value: str, detail: str) -> None:
+        self.file_state_card.set_content(value, detail)
+
+    def set_selection_status(self, value: str, detail: str) -> None:
+        self.selection_state_card.set_content(value, detail)
