@@ -27,8 +27,13 @@
     "usuario_id": 1
   },
   "filters": {
-    "skip_units": [
-      "NAN"
+    "group_dimension_strategy": "suffix_report_unit",
+    "skip_issue_codes": [
+      "missing_key",
+      "missing_name",
+      "missing_group",
+      "missing_unit",
+      "invalid_unit"
     ]
   },
   "unit_rules": [
@@ -70,6 +75,29 @@
         "LT": "L",
         "MT": "M"
       }
+    },
+    {
+      "mode": "package_regex",
+      "units": [
+        "UN"
+      ],
+      "group_patterns": [
+        "CONSTRUCAO CIVIL",
+        "TINTA",
+        "INSUMOS OFICINA",
+        "TUBOS MANGUEIRAS",
+        "OLEOS LUBRIFICANTES",
+        "DESINGRIPANTES",
+        "GRAXA",
+        "LIQUIDO ARREFECIMENTO"
+      ],
+      "pattern": "(?P<qty>\\d+(?:[.,]\\d+)?)\\s*(?P<unit>KG|G|GR|L|LT|ML|M3|M2|M|MT)\\b",
+      "content_aliases": {
+        "GR": "G",
+        "LT": "L",
+        "MT": "M"
+      },
+      "required": false
     }
   ]
 }

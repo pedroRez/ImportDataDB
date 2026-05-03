@@ -825,13 +825,18 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Validacao",
-                    f"Foram encontrados {len(validation.issues)} erro(s). Corrija-os antes de importar.",
+                    f"Foram encontrados {len(validation.issues)} erro(s) bloqueantes. Corrija-os antes de importar.",
                 )
                 return
+            confirmation_lines = [f"Enviar {validation.importable_rows} item(ns) validados para o Xerife?"]
+            if validation.skipped_rows:
+                confirmation_lines.append(
+                    f"{validation.skipped_rows} linha(s) serao descartadas pelas regras do perfil e nao serao importadas."
+                )
             confirmation = QMessageBox.question(
                 self,
                 "Importar para o Xerife",
-                f"Enviar {validation.importable_rows} item(ns) validados para o Xerife?",
+                "\n".join(confirmation_lines),
             )
             if confirmation != QMessageBox.Yes:
                 return
@@ -856,7 +861,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Importacao",
-                f"Importacao concluida.\nCriados: {result.get('created', 0)}\nAtualizados: {result.get('updated', 0)}",
+                (
+                    f"Importacao concluida.\nCriados: {result.get('created', 0)}\n"
+                    f"Atualizados: {result.get('updated', 0)}\n"
+                    f"Descartados pelo perfil: {validation.skipped_rows}"
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao importar para o Xerife", exc)
