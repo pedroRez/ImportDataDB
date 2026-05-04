@@ -5,23 +5,20 @@ from collections import Counter
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import unicodedata
-from uuid import uuid4
 
 import pandas as pd
-from PySide6.QtCore import QDate, QItemSelectionModel, QThread, Qt
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
     QFileDialog,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -37,40 +34,27 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QProgressDialog,
     QSpinBox,
-    QStackedWidget,
+    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 
 from src.core.mapping import ForeignKeyLookup, MappingSelection
-from src.core.profiles import ImportProfile, list_profiles, load_profile, save_profile
-from src.core.xerife_bridge import run_xerife_stock_batch
-from src.core.xerife_stock import XerifeStockImporter, XerifeValidationResult
 from src.db.provider import ColumnInfo, DatabaseProvider
-from src.excel.reader import ExcelReader
+from src.excel.reader import ExcelReader, SheetPreview
 from src.ui.excel_selection_dialog import ExcelSelectionDialog
-from src.ui.excel_workspace import (
-    ExcelGridModel,
-    ExcelLoadWorker,
-    ExcelSelectionResult,
-    ExcelSelectionWorkspace,
-)
-from src.ui.quick_import import ConnectionStatusBadge, QuickImportPage
-from src.ui.theme import build_app_stylesheet
-from src.version import APP_NAME, __version__
 
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} {__version__}")
+        self.setWindowTitle("ImportDataDB")
         self.resize(1200, 800)
 
         self.database = DatabaseProvider()
@@ -78,6 +62,8 @@ class MainWindow(QMainWindow):
         self.table_columns: List[ColumnInfo] = []
         self.primary_key_column: str | None = None
         self._current_header_excel_row_value = 1
+        self._current_first_data_row = 2
+        self._manual_excel_selection_confirmed = False
         self._foreign_columns_cache: dict[str, List[ColumnInfo]] = {}
         self._pre_validation_remove_duplicates = False
         self._pre_validation_trim_whitespace = False
@@ -99,22 +85,6 @@ class MainWindow(QMainWindow):
 
         self._excel_step_ready = False
         self._db_step_ready = False
-        self._available_profiles: List[ImportProfile] = []
-        self._last_validation_result: XerifeValidationResult | None = None
-        self._last_import_result: Dict[str, Any] | None = None
-        self._quick_mode = "advanced"
-        self._excel_grid_model = ExcelGridModel()
-        self._excel_grid_selection_model = QItemSelectionModel(self._excel_grid_model)
-        self._excel_dataframe: pd.DataFrame | None = None
-        self._excel_grid_headers: list[str] = []
-        self._excel_grid_first_data_row = 2
-        self._excel_grid_header_row = 1
-        self._excel_load_thread: QThread | None = None
-        self._excel_load_worker: ExcelLoadWorker | None = None
-        self._excel_load_job_id = 0
-        self._applied_excel_selection: ExcelSelectionResult | None = None
-        self._active_excel_workspace: ExcelSelectionWorkspace | None = None
-        self._excel_selection_dialog: ExcelSelectionDialog | None = None
 
         self.host_edit = QLineEdit("localhost")
         self.port_edit = QLineEdit("5432")
@@ -122,18 +92,9 @@ class MainWindow(QMainWindow):
         self.user_edit = QLineEdit()
         self.pwd_edit = QLineEdit()
         self.pwd_edit.setEchoMode(QLineEdit.Password)
-        self.loaded_profile_id: str | None = None
-        self._last_profile_preview: str = ""
-        self._last_preview_text: str = ""
 
         self._build_menu()
         self._build_layout()
-        self._excel_grid_selection_model.selectionChanged.connect(
-            lambda _selected, _deselected: self._update_selection_info()
-        )
-        self.setStyleSheet(build_app_stylesheet())
-        self._set_mode("advanced")
-        self._sync_quick_workflow_state()
 
     def _build_menu(self) -> None:
         open_action = QAction("Abrir Excel", self)
@@ -144,813 +105,22 @@ class MainWindow(QMainWindow):
 
     def _build_layout(self) -> None:
         central = QWidget()
-        central.setObjectName("AppShell")
         central_layout = QVBoxLayout(central)
-        central_layout.setContentsMargins(24, 24, 24, 24)
-        central_layout.setSpacing(16)
-
-        central_layout.addWidget(self._build_shell_header())
-        central_layout.addWidget(self._build_mode_switch())
-
-        self.content_stack = QStackedWidget()
-        self.quick_page = self._build_quick_import_page()
-        self.advanced_page = self._build_advanced_page()
-        self.quick_page_container = self._wrap_mode_page(self.quick_page)
-        self.advanced_page_container = self._wrap_mode_page(self.advanced_page, allow_horizontal=True)
-        self.content_stack.addWidget(self.quick_page_container)
-        self.content_stack.addWidget(self.advanced_page_container)
-        central_layout.addWidget(self.content_stack, 1)
-
-        self.setCentralWidget(central)
-        self._update_step_progress()
-
-    def _wrap_mode_page(self, page: QWidget, *, allow_horizontal: bool = False) -> QScrollArea:
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if allow_horizontal else Qt.ScrollBarAlwaysOff)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setWidget(page)
-        return scroll_area
-
-    def _build_shell_header(self) -> QWidget:
-        shell = QFrame()
-        shell.setProperty("card", True)
-        shell.setProperty("modeShell", True)
-        layout = QHBoxLayout(shell)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-
-        title_block = QFrame()
-        title_layout = QVBoxLayout(title_block)
-        title_layout.setContentsMargins(18, 14, 18, 14)
-        title_layout.setSpacing(4)
-
-        eyebrow = QLabel(f"{APP_NAME} {__version__}")
-        eyebrow.setProperty("role", "eyebrow")
-        title_layout.addWidget(eyebrow)
-
-        self.shell_title_label = QLabel("Importacao generica de Excel para banco")
-        self.shell_title_label.setProperty("role", "section-title")
-        title_layout.addWidget(self.shell_title_label)
-
-        self.shell_subtitle_label = QLabel(
-            "Mapeie colunas de/para, resolva FK por descricao, valide os dados e execute INSERT ou UPDATE."
-        )
-        self.shell_subtitle_label.setWordWrap(True)
-        self.shell_subtitle_label.setProperty("role", "muted")
-        title_layout.addWidget(self.shell_subtitle_label)
-
-        layout.addWidget(title_block, 1)
-
-        status_block = QFrame()
-        status_block.setProperty("card", True)
-        status_layout = QHBoxLayout(status_block)
-        status_layout.setContentsMargins(18, 14, 18, 14)
-        status_layout.setSpacing(12)
-
-        status_title = QLabel("Conexao do banco")
-        status_title.setProperty("role", "card-title")
-        status_layout.addWidget(status_title)
-
-        self.connection_status_label = ConnectionStatusBadge()
-        status_layout.addWidget(self.connection_status_label)
-
-        self.connection_btn = QPushButton("Configurar conexao")
-        self.connection_btn.setProperty("variant", "primary")
-        self.connection_btn.clicked.connect(self._open_connection_dialog)
-        status_layout.addWidget(self.connection_btn)
-
-        layout.addWidget(status_block, 0)
-        return shell
-
-    def _build_mode_switch(self) -> QWidget:
-        container = QFrame()
-        container.setProperty("card", True)
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(10)
-
-        text = QLabel("Fluxo de trabalho:")
-        text.setProperty("role", "card-title")
-        layout.addWidget(text)
-
-        self.mode_button_group = QButtonGroup(self)
-        self.mode_button_group.setExclusive(True)
-
-        self.advanced_mode_btn = QToolButton()
-        self.advanced_mode_btn.setText("Importacao generica")
-        self.advanced_mode_btn.setCheckable(True)
-        self.advanced_mode_btn.setProperty("modeButton", True)
-        self.advanced_mode_btn.clicked.connect(lambda: self._set_mode("advanced"))
-        self.mode_button_group.addButton(self.advanced_mode_btn)
-        layout.addWidget(self.advanced_mode_btn)
-
-        self.quick_mode_btn = QToolButton()
-        self.quick_mode_btn.setText("Perfil Xerife")
-        self.quick_mode_btn.setCheckable(True)
-        self.quick_mode_btn.setProperty("modeButton", True)
-        self.quick_mode_btn.clicked.connect(lambda: self._set_mode("quick"))
-        self.mode_button_group.addButton(self.quick_mode_btn)
-        layout.addWidget(self.quick_mode_btn)
-        layout.addStretch()
-        return container
-
-    def _build_quick_import_page(self) -> QuickImportPage:
-        page = QuickImportPage()
-        for index, button in enumerate(page.stepper.buttons):
-            button.clicked.connect(lambda _checked=False, step=index: page.set_step(step))
-        page.use_profile_btn.clicked.connect(self._apply_selected_quick_profile)
-        page.new_profile_btn.hide()
-        page.model_next_btn.clicked.connect(lambda: page.set_step(1))
-        page.spreadsheet_back_btn.clicked.connect(lambda: page.set_step(0))
-        page.spreadsheet_next_btn.clicked.connect(lambda: page.set_step(2))
-        page.validation_back_btn.clicked.connect(lambda: page.set_step(1))
-        page.validation_next_btn.clicked.connect(lambda: page.set_step(3))
-        page.import_back_btn.clicked.connect(lambda: page.set_step(2))
-        page.profile_list.currentItemChanged.connect(lambda _current, _previous: self._sync_quick_workflow_state())
-        page.open_selection_btn.clicked.connect(self._open_excel_selection_dialog)
-        page.reopen_file_btn.clicked.connect(self._choose_excel)
-        page.validate_btn.clicked.connect(self._validate_profile_only)
-        page.import_btn.clicked.connect(self._import_validated_profile)
-        page.validation_details_btn.clicked.connect(self._toggle_validation_details)
-        page.set_step(0)
-        return page
-
-    def _build_advanced_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-
-        intro = QFrame()
-        intro.setProperty("card", True)
-        intro_layout = QVBoxLayout(intro)
-        intro_layout.setContentsMargins(18, 16, 18, 16)
-        intro_layout.setSpacing(6)
-
-        intro_eyebrow = QLabel("Fluxo principal")
-        intro_eyebrow.setProperty("role", "eyebrow")
-        intro_layout.addWidget(intro_eyebrow)
-
-        intro_title = QLabel("Mapeamento de/para, FK e validacoes")
-        intro_title.setProperty("role", "section-title")
-        intro_layout.addWidget(intro_title)
-
-        intro_text = QLabel(
-            "Use este fluxo para importar qualquer planilha para qualquer tabela conectada, "
-            "com valores padrao, relacionamentos FK por descricao e INSERT ou UPDATE."
-        )
-        intro_text.setWordWrap(True)
-        intro_text.setProperty("role", "muted")
-        intro_layout.addWidget(intro_text)
-        layout.addWidget(intro)
 
         self.step_header_label = QLabel()
         self.step_hint_label = QLabel()
         self.step_hint_label.setWordWrap(True)
-
-        progress_card = QFrame()
-        progress_card.setProperty("card", True)
-        progress_layout = QVBoxLayout(progress_card)
-        progress_layout.setContentsMargins(20, 18, 20, 18)
-        progress_layout.setSpacing(6)
-        progress_layout.addWidget(self.step_header_label)
-        progress_layout.addWidget(self.step_hint_label)
-        layout.addWidget(progress_card)
-
-        self.profile_backend_panel = self._build_profile_panel()
-        self.profile_backend_panel.setParent(page)
-        self.profile_backend_panel.hide()
+        central_layout.addWidget(self.step_header_label)
+        central_layout.addWidget(self.step_hint_label)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_excel_tab(), "1. Excel")
-        self.tabs.addTab(self._build_database_tab(), "2. Banco de dados")
-        self.tabs.addTab(self._build_mapping_tab(), "3. Mapeamento")
-        layout.addWidget(self.tabs, 1)
-        return page
+        self.tabs.addTab(self._build_excel_tab(), "Step 1 - Excel")
+        self.tabs.addTab(self._build_database_tab(), "Step 2 - Banco de Dados")
+        self.tabs.addTab(self._build_mapping_tab(), "Step 3 - Mapeamento")
 
-    def _build_profile_panel(self) -> QWidget:
-        panel = QGroupBox("Modelos e parametros do fluxo rapido")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 20, 18, 18)
-        layout.setSpacing(16)
-
-        saved_group = QGroupBox("Usar modelo salvo")
-        saved_layout = QVBoxLayout(saved_group)
-        saved_layout.setSpacing(14)
-
-        saved_grid = QGridLayout()
-        saved_grid.setHorizontalSpacing(12)
-        saved_grid.setVerticalSpacing(12)
-        saved_grid.addWidget(QLabel("Modelo"), 0, 0)
-        self.profile_combo = QComboBox()
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_combo_changed)
-        saved_grid.addWidget(self.profile_combo, 0, 1, 1, 2)
-        self.profile_load_btn = QPushButton("Aplicar modelo")
-        self.profile_load_btn.clicked.connect(self._apply_selected_profile)
-        saved_grid.addWidget(self.profile_load_btn, 0, 3)
-        self.profile_refresh_btn = QPushButton("Atualizar lista")
-        self.profile_refresh_btn.clicked.connect(self._refresh_profile_options)
-        saved_grid.addWidget(self.profile_refresh_btn, 0, 4)
-        saved_layout.addLayout(saved_grid)
-
-        action_row = QGridLayout()
-        action_row.setHorizontalSpacing(12)
-        action_row.setVerticalSpacing(12)
-        self.quick_choose_file_btn = QPushButton("Escolher planilha")
-        self.quick_choose_file_btn.clicked.connect(self._choose_excel)
-        action_row.addWidget(self.quick_choose_file_btn, 0, 0)
-        self.quick_validate_btn = QPushButton("Validar e importar")
-        self.quick_validate_btn.setProperty("variant", "primary")
-        self.quick_validate_btn.clicked.connect(self._validate_and_import_profile)
-        action_row.addWidget(self.quick_validate_btn, 0, 1)
-        saved_layout.addLayout(action_row)
-
-        self.profile_summary_label = QLabel("Selecione um modelo salvo para carregar o mapeamento e executar o fluxo rapido.")
-        self.profile_summary_label.setWordWrap(True)
-        saved_layout.addWidget(self.profile_summary_label)
-        layout.addWidget(saved_group)
-
-        edit_group = QGroupBox("Criar/editar modelo")
-        edit_layout = QVBoxLayout(edit_group)
-        edit_layout.setSpacing(14)
-
-        id_grid = QGridLayout()
-        id_grid.setHorizontalSpacing(12)
-        id_grid.setVerticalSpacing(12)
-        id_grid.addWidget(QLabel("ID"), 0, 0)
-        self.profile_id_edit = QLineEdit()
-        id_grid.addWidget(self.profile_id_edit, 0, 1)
-        id_grid.addWidget(QLabel("Nome"), 0, 2)
-        self.profile_name_edit = QLineEdit()
-        id_grid.addWidget(self.profile_name_edit, 0, 3)
-        edit_layout.addLayout(id_grid)
-
-        meta_grid = QGridLayout()
-        meta_grid.setHorizontalSpacing(12)
-        meta_grid.setVerticalSpacing(12)
-        meta_grid.addWidget(QLabel("Alvo"), 0, 0)
-        self.profile_target_combo = QComboBox()
-        self.profile_target_combo.addItem("xerife_stock")
-        meta_grid.addWidget(self.profile_target_combo, 0, 1)
-        meta_grid.addWidget(QLabel("Filial"), 0, 2)
-        self.profile_filial_spin = QSpinBox()
-        self.profile_filial_spin.setMinimum(0)
-        self.profile_filial_spin.setValue(1)
-        meta_grid.addWidget(self.profile_filial_spin, 0, 3)
-        meta_grid.addWidget(QLabel("Usuario"), 1, 0)
-        self.profile_usuario_spin = QSpinBox()
-        self.profile_usuario_spin.setMinimum(0)
-        self.profile_usuario_spin.setValue(1)
-        meta_grid.addWidget(self.profile_usuario_spin, 1, 1)
-        self.profile_save_btn = QPushButton("Salvar modelo atual")
-        self.profile_save_btn.setProperty("variant", "primary")
-        self.profile_save_btn.clicked.connect(self._save_current_profile)
-        meta_grid.addWidget(self.profile_save_btn, 1, 3)
-        edit_layout.addLayout(meta_grid)
-
-        helper = QLabel(
-            "O modelo salvo usa a aba, cabecalho, faixa de linhas/colunas e o alvo atual. "
-            "No fluxo Xerife, o importador aplica as regras de unidade e envia em lote para o ERP."
-        )
-        helper.setWordWrap(True)
-        edit_layout.addWidget(helper)
-        layout.addWidget(edit_group)
-
-        self._refresh_profile_options()
-        return panel
-
-    def _configure_excel_workspace(self, workspace: ExcelSelectionWorkspace) -> None:
-        workspace.bind_grid(self._excel_grid_model, self._excel_grid_selection_model)
-        workspace.chooseFileRequested.connect(self._choose_excel)
-        workspace.fileDropped.connect(self._load_excel_file_from_drop)
-        workspace.sheetChanged.connect(self._on_workspace_sheet_changed)
-        workspace.reloadRequested.connect(self._refresh_sheet_preview)
-        workspace.applySelectionRequested.connect(self._apply_selection_to_range)
-        workspace.useSelectionAsHeaderRequested.connect(self._apply_selection_to_header)
-        workspace.clearSelectionRequested.connect(self._clear_excel_selection)
-
-    def _all_excel_workspaces(self) -> list[ExcelSelectionWorkspace]:
-        workspaces: list[ExcelSelectionWorkspace] = []
-        if self._active_excel_workspace is not None:
-            workspaces.append(self._active_excel_workspace)
-        return workspaces
-
-    def _set_mode(self, mode: str) -> None:
-        self._quick_mode = mode
-        is_quick = mode == "quick"
-        self.quick_mode_btn.setChecked(is_quick)
-        self.advanced_mode_btn.setChecked(not is_quick)
-        if hasattr(self, "shell_title_label"):
-            if is_quick:
-                self.shell_title_label.setText("Importacao por perfil Xerife")
-                self.shell_subtitle_label.setText(
-                    "Selecione um modelo salvo, confirme o Excel em uma janela dedicada e envie o lote."
-                )
-            else:
-                self.shell_title_label.setText("Importacao generica de Excel para banco")
-                self.shell_subtitle_label.setText(
-                    "Mapeie colunas de/para, resolva FK por descricao, valide os dados e execute INSERT ou UPDATE."
-                )
-        self._refresh_widget_style(self.quick_mode_btn)
-        self._refresh_widget_style(self.advanced_mode_btn)
-        self.content_stack.setCurrentWidget(
-            self.quick_page_container if is_quick else self.advanced_page_container
-        )
-
-    def _toggle_advanced_profile_panel(self, visible: bool) -> None:
-        if hasattr(self, "advanced_profile_panel"):
-            self.advanced_profile_panel.setVisible(visible)
-        if hasattr(self, "advanced_profile_toggle"):
-            self.advanced_profile_toggle.setText(
-                "Ocultar editor de modelo" if visible else "Mostrar editor de modelo"
-            )
-
-    def _selected_quick_profile_id(self) -> str | None:
-        if not hasattr(self, "quick_page"):
-            return None
-        return self.quick_page.selected_profile_id()
-
-    def _apply_selected_quick_profile(self) -> None:
-        profile_id = self._selected_quick_profile_id()
-        if not profile_id:
-            QMessageBox.warning(self, "Modelo", "Selecione um modelo salvo na lista.")
-            return
-        profile = load_profile(profile_id)
-        self._apply_profile(profile)
-        self.quick_page.set_step(1)
-
-    def _open_advanced_profile_editor(self) -> None:
-        self._set_mode("quick")
-        self.quick_page.set_step(0)
-
-    def _toggle_validation_details(self) -> None:
-        visible = not self.quick_page.validation_details.isVisible()
-        self.quick_page.validation_details.setVisible(visible)
-        self.quick_page.validation_details_btn.setText("Ocultar detalhes" if visible else "Ver detalhes")
-
-    def _load_excel_file_from_drop(self, file_name: str) -> None:
-        self._load_excel_file(
-            Path(file_name),
-            open_dialog=True,
-            use_profile=self._quick_mode == "quick" and bool(self.loaded_profile_id),
-        )
-
-    def _clone_excel_selection(self, selection: ExcelSelectionResult | None) -> ExcelSelectionResult | None:
-        if selection is None:
-            return None
-        return ExcelSelectionResult(
-            header_row=selection.header_row,
-            data_start_row=selection.data_start_row,
-            data_end_row=selection.data_end_row,
-            col_start=selection.col_start,
-            col_end=selection.col_end,
-            selected_columns=list(selection.selected_columns),
-        )
-
-    def _capture_excel_dialog_snapshot(self) -> dict[str, Any]:
-        selected_items = self.sheet_list.selectedItems() if hasattr(self, "sheet_list") else []
-        selected_sheet = selected_items[0].text() if selected_items else None
-        return {
-            "sheet_name": selected_sheet,
-            "header_row": self.header_row_spin.value() if hasattr(self, "header_row_spin") else 1,
-            "row_start": self.row_start_spin.value() if hasattr(self, "row_start_spin") else 0,
-            "row_end": self.row_end_spin.value() if hasattr(self, "row_end_spin") else 0,
-            "col_start": self.col_start_spin.value() if hasattr(self, "col_start_spin") else 1,
-            "col_end": self.col_end_spin.value() if hasattr(self, "col_end_spin") else 0,
-            "applied_selection": self._clone_excel_selection(self._applied_excel_selection),
-            "validation_result": self._last_validation_result,
-            "import_result": self._last_import_result,
-            "profile_preview": self._last_profile_preview,
-            "excel_ready": self._excel_step_ready,
-        }
-
-    def _restore_excel_dialog_snapshot(self, snapshot: dict[str, Any]) -> None:
-        self.header_row_spin.setValue(int(snapshot.get("header_row", 1)))
-        self.row_start_spin.setValue(int(snapshot.get("row_start", 0)))
-        self.row_end_spin.setValue(int(snapshot.get("row_end", 0)))
-        self.col_start_spin.setValue(int(snapshot.get("col_start", 1)))
-        self.col_end_spin.setValue(int(snapshot.get("col_end", 0)))
-        self._applied_excel_selection = self._clone_excel_selection(snapshot.get("applied_selection"))
-        self._last_validation_result = snapshot.get("validation_result")
-        self._last_import_result = snapshot.get("import_result")
-        self._last_profile_preview = str(snapshot.get("profile_preview", "") or "")
-        self._set_excel_step_ready(bool(snapshot.get("excel_ready", False)))
-
-        selected_sheet = snapshot.get("sheet_name")
-        if selected_sheet:
-            self._set_selected_sheet(str(selected_sheet))
-        else:
-            self._refresh_sheet_preview()
-        self._sync_quick_workflow_state()
-
-    def _default_excel_selection(self) -> ExcelSelectionResult | None:
-        if not self.excel_reader:
-            return None
-        selected_items = self.sheet_list.selectedItems()
-        if not selected_items:
-            return None
-        data_start_row = self._current_data_start_excel_row()
-        if self._excel_grid_model.rowCount() > 0:
-            last_excel_row = self._excel_row_from_table_row(self._excel_grid_model.rowCount() - 1)
-        else:
-            last_excel_row = data_start_row
-        data_end_row = self.row_end_spin.value() or last_excel_row
-        col_start = self.col_start_spin.value() or 1
-        col_end = self.col_end_spin.value() or max(col_start, col_start + max(len(self._excel_grid_headers) - 1, 0))
-        selected_columns = list(self._excel_grid_headers)
-        return ExcelSelectionResult(
-            header_row=self._current_header_excel_row(),
-            data_start_row=data_start_row,
-            data_end_row=data_end_row,
-            col_start=col_start,
-            col_end=col_end,
-            selected_columns=selected_columns,
-        )
-
-    def _confirm_excel_dialog_selection(self, *, use_selected_header: bool) -> None:
-        selection = self._current_excel_selection() or self._default_excel_selection()
-        if selection is None:
-            QMessageBox.warning(self, "Excel", "Nao foi possivel confirmar o recorte atual.")
-            return
-
-        if use_selected_header and self._current_excel_selection() is not None:
-            new_header_row = max(1, selection.data_start_row)
-            self.header_row_spin.setValue(new_header_row)
-            self.row_start_spin.setValue(new_header_row + 1)
-            self.row_end_spin.setValue(selection.data_end_row)
-            self.col_start_spin.setValue(selection.col_start)
-            self.col_end_spin.setValue(selection.col_end)
-            self._applied_excel_selection = ExcelSelectionResult(
-                header_row=new_header_row,
-                data_start_row=new_header_row + 1,
-                data_end_row=selection.data_end_row,
-                col_start=selection.col_start,
-                col_end=selection.col_end,
-                selected_columns=[],
-            )
-            self._refresh_sheet_preview()
-        else:
-            self._applied_excel_selection = self._clone_excel_selection(selection)
-            self.header_row_spin.setValue(selection.header_row)
-            self.row_start_spin.setValue(selection.data_start_row)
-            self.row_end_spin.setValue(selection.data_end_row)
-            self.col_start_spin.setValue(selection.col_start)
-            self.col_end_spin.setValue(selection.col_end)
-
-        self._set_excel_step_ready(True)
-        self._last_validation_result = None
-        self._last_import_result = None
-        self._last_profile_preview = ""
-        self._update_profile_summary()
-        self._sync_quick_workflow_state()
-
-    def _open_excel_selection_dialog(self) -> None:
-        if not self.excel_reader:
-            QMessageBox.warning(self, "Excel", "Escolha a planilha antes de abrir o seletor.")
-            return
-        if not self.sheet_list.selectedItems():
-            QMessageBox.warning(self, "Excel", "Selecione uma aba da planilha antes de abrir o seletor.")
-            return
-
-        snapshot = self._capture_excel_dialog_snapshot()
-        dialog = ExcelSelectionDialog(parent=self)
-        self._excel_selection_dialog = dialog
-        self._active_excel_workspace = dialog.workspace
-        self._configure_excel_workspace(dialog.workspace)
-        dialog.set_file_hint(self.excel_file_path)
-        dialog.show_maximized()
-        self._sync_excel_workspaces()
-        if self._excel_dataframe is None:
-            dialog.workspace.set_loading("Carregando planilha...", "Montando grade da aba selecionada.")
-        elif self._excel_grid_model.rowCount() > 0:
-            dialog.workspace.show_table(
-                status_text=(
-                    f"Grade pronta: {self._excel_grid_model.rowCount()} linhas x "
-                    f"{self._excel_grid_model.columnCount()} colunas."
-                ),
-                tone="success",
-            )
-        if self._excel_dataframe is None and self._excel_load_thread is None:
-            self._refresh_sheet_preview()
-        result = QDialog.Rejected
-        use_selected_header = False
-        try:
-            result = dialog.exec()
-            use_selected_header = dialog.header_checkbox.isChecked()
-        finally:
-            self._active_excel_workspace = None
-            self._excel_selection_dialog = None
-            dialog.deleteLater()
-
-        if result == QDialog.Accepted:
-            self._confirm_excel_dialog_selection(use_selected_header=use_selected_header)
-        else:
-            self._restore_excel_dialog_snapshot(snapshot)
-
-    def _set_connection_status(self, text: str, *, connected: bool, tone: str | None = None) -> None:
-        self.connection_status_label.set_status(connected, text, tone=tone)
-        if hasattr(self, "quick_page"):
-            self.quick_page.connection_hint.setText(text)
-
-    def _refresh_widget_style(self, widget: QWidget) -> None:
-        widget.style().unpolish(widget)
-        widget.style().polish(widget)
-        widget.update()
-
-    def _set_selected_sheet(self, sheet_name: str) -> None:
-        if not self.excel_reader or not sheet_name:
-            return
-        matching_items = self.sheet_list.findItems(sheet_name, Qt.MatchExactly)
-        if matching_items:
-            self.sheet_list.blockSignals(True)
-            self.sheet_list.setCurrentItem(matching_items[0])
-            self.sheet_list.blockSignals(False)
-            self._on_sheet_selected()
-
-    def _on_workspace_sheet_changed(self, sheet_name: str) -> None:
-        if not sheet_name or not self.excel_reader:
-            return
-        selected_items = self.sheet_list.selectedItems()
-        if selected_items and selected_items[0].text() == sheet_name:
-            return
-        self._set_selected_sheet(sheet_name)
-
-    def _sync_excel_workspaces(self) -> None:
-        if not hasattr(self, "sheet_list"):
-            return
-        sheet_names = [self.sheet_list.item(index).text() for index in range(self.sheet_list.count())]
-        selected_items = self.sheet_list.selectedItems()
-        current_sheet = selected_items[0].text() if selected_items else None
-        selection_text = self.selection_info_label.text() if hasattr(self, "selection_info_label") else self._selection_hint_text()
-        applied_text = self._applied_selection_summary()
-        if hasattr(self, "advanced_file_label"):
-            self.advanced_file_label.setText(f"Arquivo atual: {self.excel_file_path or 'nenhum'}")
-        if hasattr(self, "advanced_sheet_label"):
-            self.advanced_sheet_label.setText(f"Aba atual: {current_sheet or 'nenhuma'}")
-        if hasattr(self, "advanced_selection_label"):
-            self.advanced_selection_label.setText(f"Recorte confirmado: {applied_text}")
-        if hasattr(self, "open_advanced_selection_btn"):
-            self.open_advanced_selection_btn.setEnabled(bool(self.excel_reader))
-        if hasattr(self, "use_range_btn"):
-            self.use_range_btn.setText("Recorte confirmado")
-            self.use_range_btn.setToolTip(applied_text)
-        for workspace in self._all_excel_workspaces():
-            workspace.set_file_path(self.excel_file_path)
-            workspace.set_sheet_options(sheet_names, current_sheet)
-            workspace.set_selection_summary(selection_text)
-            workspace.set_applied_summary(applied_text)
-        if self._excel_selection_dialog is not None:
-            self._excel_selection_dialog.set_footer_hint(
-                "Selecione um bloco ou confirme o intervalo atual." if self._excel_dataframe is not None else "Aguarde a grade carregar."
-            )
-
-    def _summarize_range(self) -> str:
-        if not all(
-            hasattr(self, attr)
-            for attr in ("header_row_spin", "row_start_spin", "row_end_spin", "col_start_spin", "col_end_spin")
-        ):
-            return "Aguardando configuracao do recorte."
-        header_row = self._current_header_excel_row()
-        data_start_row = self._current_data_start_excel_row(header_row)
-        data_end_row = self.row_end_spin.value() or 0
-        col_start = self.col_start_spin.value() or 1
-        col_end = self.col_end_spin.value() or 0
-        row_text = f"linhas {data_start_row} até {data_end_row or 'fim'}"
-        col_text = f"colunas {col_start} até {col_end or 'fim'}"
-        return f"Cabeçalho na linha {header_row}; {row_text}; {col_text}."
-
-    def _sync_quick_workflow_state(self) -> None:
-        if not hasattr(self, "quick_page"):
-            return
-
-        profile_items = [(profile.id, profile.name, profile.summary) for profile in self._available_profiles]
-        self.quick_page.set_profile_items(profile_items)
-        self.quick_page.profile_list.blockSignals(True)
-        self.quick_page.select_profile(self.loaded_profile_id or self._selected_quick_profile_id())
-        self.quick_page.profile_list.blockSignals(False)
-
-        selected_profile = None
-        selected_profile_id = self._selected_quick_profile_id()
-        if selected_profile_id:
-            try:
-                selected_profile = load_profile(str(selected_profile_id))
-            except FileNotFoundError:
-                selected_profile = None
-
-        applied_profile = None
-        if self.loaded_profile_id:
-            try:
-                applied_profile = load_profile(self.loaded_profile_id)
-            except FileNotFoundError:
-                applied_profile = None
-
-        if applied_profile:
-            model_detail = f"Modelo aplicado: {applied_profile.summary}"
-        elif selected_profile:
-            model_detail = f"Selecionado: {selected_profile.summary}. Clique em 'Usar este modelo' para aplicar."
-        else:
-            model_detail = "Nenhum modelo aplicado."
-        self.quick_page.profile_detail_label.setText(model_detail)
-        model_value = applied_profile.name if applied_profile else (selected_profile.name if selected_profile else "Nenhum modelo")
-        model_state_detail = "Aplicado ao fluxo atual." if applied_profile else "Selecione e aplique um modelo salvo."
-        self.quick_page.set_model_status(model_value, model_state_detail)
-
-        file_value = self.excel_file_path.name if self.excel_file_path else "Nenhuma planilha"
-        current_sheet = ""
-        if hasattr(self, "sheet_list"):
-            selected_items = self.sheet_list.selectedItems()
-            if selected_items:
-                current_sheet = selected_items[0].text()
-        file_detail = f"Aba: {current_sheet}" if current_sheet else "Escolha um arquivo Excel."
-        self.quick_page.set_file_status(file_value, file_detail)
-        self.quick_page.file_name_label.setText(str(self.excel_file_path) if self.excel_file_path else "Nenhum arquivo selecionado.")
-        self.quick_page.sheet_name_label.setText(current_sheet or "Nenhuma aba confirmada.")
-
-        selection_summary = self._applied_selection_summary()
-        selection_value = "Confirmado" if self._applied_excel_selection else ("Arquivo carregado" if self.excel_reader else "Pendente")
-        selection_detail = selection_summary
-        self.quick_page.set_selection_status(selection_value, selection_detail)
-        self.quick_page.range_summary_label.setText(selection_summary)
-        self.quick_page.spreadsheet_status_label.setProperty(
-            "badgeTone",
-            "success" if self._applied_excel_selection else ("warning" if self.excel_reader else "neutral"),
-        )
-        self.quick_page.spreadsheet_status_label.setText(
-            "Recorte confirmado para validacao."
-            if self._applied_excel_selection
-            else ("Abra o seletor do Excel para revisar o recorte." if self.excel_reader else "Escolha um arquivo Excel.")
-        )
-        self._refresh_widget_style(self.quick_page.spreadsheet_status_label)
-        self.quick_page.open_selection_btn.setEnabled(bool(self.excel_reader))
-        self.quick_page.spreadsheet_next_btn.setEnabled(bool(self._applied_excel_selection))
-
-        self._sync_excel_workspaces()
-
-        validation = self._last_validation_result
-        if validation:
-            blocking = len(validation.issues)
-            skipped = validation.skipped_rows
-            self.quick_page.validation_cards["total"].set_value(str(validation.total_rows))
-            self.quick_page.validation_cards["importable"].set_value(
-                str(validation.importable_rows),
-                tone="success" if validation.importable_rows else "warning",
-            )
-            self.quick_page.validation_cards["skipped"].set_value(str(skipped), tone="warning" if skipped else "neutral")
-            self.quick_page.validation_cards["blocking"].set_value(
-                str(blocking),
-                tone="danger" if blocking else "success",
-            )
-            if blocking:
-                self.quick_page.validation_status_label.setProperty("badgeTone", "danger")
-                self.quick_page.validation_status_label.setText(
-                    f"Foram encontrados {blocking} erro(s) bloqueantes. Ajuste o perfil ou use o modo avançado."
-                )
-                self._refresh_widget_style(self.quick_page.validation_status_label)
-            else:
-                tone = "warning" if skipped else "success"
-                self.quick_page.validation_status_label.setProperty("badgeTone", tone)
-                self.quick_page.validation_status_label.setText(
-                    f"Validação pronta. Importáveis: {validation.importable_rows}. Descartadas: {validation.skipped_rows}."
-                )
-                self._refresh_widget_style(self.quick_page.validation_status_label)
-            self.quick_page.validation_details.setPlainText(validation.preview_text())
-            issue_rows = self._build_quick_issue_rows(validation)
-            self.quick_page.populate_validation_rows(issue_rows)
-        else:
-            self.quick_page.validation_cards["total"].set_value("--")
-            self.quick_page.validation_cards["importable"].set_value("--")
-            self.quick_page.validation_cards["skipped"].set_value("--")
-            self.quick_page.validation_cards["blocking"].set_value("--")
-            self.quick_page.validation_status_label.setProperty("badgeTone", "neutral")
-            self.quick_page.validation_status_label.setText("Validação ainda não executada.")
-            self._refresh_widget_style(self.quick_page.validation_status_label)
-            self.quick_page.validation_details.setPlainText(self._last_profile_preview or "")
-            self.quick_page.populate_validation_rows([])
-
-        _refresh_import = self._last_import_result
-        skipped_rows = validation.skipped_rows if validation else 0
-        self.quick_page.result_card.set_result(_refresh_import, skipped_rows=skipped_rows)
-
-        connection_ready = bool(
-            self.db_edit.text().strip() and self.user_edit.text().strip() and self.host_edit.text().strip()
-        )
-        checklist_lines = [
-            f"Modelo aplicado: {'sim' if self.loaded_profile_id else 'nao'}",
-            f"Planilha carregada: {'sim' if self.excel_reader else 'nao'}",
-            f"Conexao configurada: {'sim' if connection_ready else 'nao'}",
-            f"Validacao pronta: {'sim' if validation and validation.can_import else 'nao'}",
-        ]
-        self.quick_page.import_checklist_label.setText("\n".join(checklist_lines))
-        can_import = bool(validation and validation.can_import and connection_ready)
-        self.quick_page.import_btn.setEnabled(can_import)
-        if can_import:
-            self.quick_page.import_status_label.setProperty("badgeTone", "success")
-            self.quick_page.import_status_label.setText("Tudo pronto para importar o lote.")
-            self._refresh_widget_style(self.quick_page.import_status_label)
-        elif validation and validation.can_import and not connection_ready:
-            self.quick_page.import_status_label.setProperty("badgeTone", "warning")
-            self.quick_page.import_status_label.setText("A validacao terminou, mas faltam os dados da conexao.")
-            self._refresh_widget_style(self.quick_page.import_status_label)
-        else:
-            self.quick_page.import_status_label.setProperty("badgeTone", "warning")
-            self.quick_page.import_status_label.setText("Ainda faltam itens obrigatorios antes do envio.")
-            self._refresh_widget_style(self.quick_page.import_status_label)
-
-        self._sync_quick_stepper(applied_profile, validation)
-        self.quick_page.validation_next_btn.setEnabled(bool(validation and validation.can_import))
-
-    def _summarize_range(self) -> str:
-        if not all(
-            hasattr(self, attr)
-            for attr in ("header_row_spin", "row_start_spin", "row_end_spin", "col_start_spin", "col_end_spin")
-        ):
-            return "Aguardando configuracao do recorte."
-        header_row = self._current_header_excel_row()
-        data_start_row = self._current_data_start_excel_row(header_row)
-        data_end_row = self.row_end_spin.value() or 0
-        col_start = self.col_start_spin.value() or 1
-        col_end = self.col_end_spin.value() or 0
-        row_text = f"linhas {data_start_row} ate {data_end_row or 'fim'}"
-        col_text = f"colunas {col_start} ate {col_end or 'fim'}"
-        return f"Cabecalho na linha {header_row}; {row_text}; {col_text}."
-
-    def _applied_selection_summary(self) -> str:
-        if not self._applied_excel_selection:
-            return f"Nenhum recorte aplicado. Intervalo atual: {self._summarize_range()}"
-        selection = self._applied_excel_selection
-        columns_text = ", ".join(selection.selected_columns[:4]) if selection.selected_columns else "colunas confirmadas"
-        if len(selection.selected_columns) > 4:
-            columns_text += f" ... (+{len(selection.selected_columns) - 4})"
-        return (
-            "Recorte aplicado: "
-            f"cabecalho={selection.header_row}, linhas {selection.data_start_row}-{selection.data_end_row}, "
-            f"colunas {selection.col_start}-{selection.col_end} | {columns_text}"
-        )
-
-    def _sync_quick_stepper(
-        self,
-        current_profile: ImportProfile | None,
-        validation: XerifeValidationResult | None,
-    ) -> None:
-        step0_state = "ready" if current_profile else "active"
-        step1_state = "ready" if self._applied_excel_selection else ("warning" if self.excel_reader else "pending")
-        step2_state = "pending"
-        step3_state = "pending"
-
-        if validation:
-            if validation.issues:
-                step2_state = "error"
-            elif validation.skipped_rows:
-                step2_state = "warning"
-            else:
-                step2_state = "ready"
-            step3_state = "ready" if self._last_import_result else "warning"
-
-        self.quick_page.stepper.set_step_state(
-            0,
-            title="Modelo",
-            detail=current_profile.name if current_profile else "Selecione e aplique um modelo salvo.",
-            state=step0_state,
-        )
-        self.quick_page.stepper.set_step_state(
-            1,
-            title="Planilha",
-            detail=(
-                self.excel_file_path.name if self._applied_excel_selection and self.excel_file_path
-                else "Escolha o arquivo e confirme o recorte na janela do Excel."
-            ),
-            state=step1_state,
-        )
-        self.quick_page.stepper.set_step_state(
-            2,
-            title="Revisão",
-            detail=(
-                f"{validation.importable_rows} importáveis, {validation.skipped_rows} descartadas."
-                if validation
-                else "Execute a validação do perfil."
-            ),
-            state=step2_state,
-        )
-        self.quick_page.stepper.set_step_state(
-            3,
-            title="Importar",
-            detail=(
-                "Lote já enviado nesta sessão."
-                if self._last_import_result
-                else "Envie o lote após uma validação sem bloqueios."
-            ),
-            state=step3_state,
-        )
-
-    def _build_quick_issue_rows(self, validation: XerifeValidationResult) -> list[tuple[str, str, str, str]]:
-        rows: list[tuple[str, str, str, str]] = []
-        for issue in validation.issues[:8]:
-            rows.append((str(issue.row_number), "Bloqueante", issue.code, issue.message))
-        for issue in validation.ignored_issues[:8]:
-            rows.append((str(issue.row_number), "Descartada", issue.code, issue.message))
-        return rows
+        central_layout.addWidget(self.tabs)
+        self.setCentralWidget(central)
+        self._update_step_progress()
 
     def _update_step_progress(self) -> None:
         step1 = f"{'[x]' if self._excel_step_ready else '[ ]'} Step 1 - Excel"
@@ -959,7 +129,7 @@ class MainWindow(QMainWindow):
         self.step_header_label.setText("  >  ".join([step1, step2, step3]))
 
         if not self._excel_step_ready:
-            hint = "Step 1: importe o Excel e confirme o recorte para liberar o proximo passo."
+            hint = "Step 1: importe o Excel e selecione uma aba para liberar o proximo passo."
         elif not self._db_step_ready:
             hint = "Step 2: va para Banco de Dados, conecte e escolha a tabela; depois siga para o mapeamento."
         else:
@@ -972,9 +142,9 @@ class MainWindow(QMainWindow):
             self.db_next_btn.setEnabled(self._db_step_ready)
         if getattr(self, "excel_step_hint", None):
             if self._excel_step_ready:
-                self.excel_step_hint.setText("Recorte confirmado. Clique em Proximo para ir para Banco de Dados (Step 2).")
+                self.excel_step_hint.setText("Aba selecionada. Clique em Proximo para ir para Banco de Dados (Step 2).")
             else:
-                self.excel_step_hint.setText("Escolha o arquivo e confirme o recorte do Excel para habilitar o proximo passo.")
+                self.excel_step_hint.setText("Escolha o arquivo e a aba do Excel para habilitar o proximo passo.")
         if getattr(self, "db_step_hint", None):
             if self._db_step_ready:
                 self.db_step_hint.setText("Tabela selecionada. Clique em Proximo para seguir para o mapeamento (Step 3).")
@@ -995,7 +165,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_excel_panel())
 
         excel_controls = QHBoxLayout()
-        self.excel_step_hint = QLabel("Importe o Excel e confirme o recorte para seguir para o banco de dados.")
+        self.excel_step_hint = QLabel("Importe o Excel e selecione uma aba para seguir para o banco de dados.")
         self.excel_step_hint.setWordWrap(True)
         excel_controls.addWidget(self.excel_step_hint, 1)
         self.excel_next_btn = QPushButton("Proximo: Banco de Dados")
@@ -1009,18 +179,15 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        connection_group = QGroupBox("Conexao")
-        connection_layout = QVBoxLayout(connection_group)
-        helper = QLabel(
-            "A conexao principal fica na barra superior. "
-            "Use este painel para confirmar o status e seguir para a escolha da tabela."
-        )
-        helper.setWordWrap(True)
-        connection_layout.addWidget(helper)
+        connection_group = QGroupBox("Conexão")
+        connection_layout = QHBoxLayout(connection_group)
+        self.connection_btn = QPushButton("Conectar ao banco...")
+        self.connection_btn.clicked.connect(self._open_connection_dialog)
+        connection_layout.addWidget(self.connection_btn)
 
-        self.database_status_copy_label = QLabel("Sem conexao ativa.")
-        self.database_status_copy_label.setWordWrap(True)
-        connection_layout.addWidget(self.database_status_copy_label)
+        self.connection_status_label = QLabel("Não conectado")
+        self.connection_status_label.setWordWrap(True)
+        connection_layout.addWidget(self.connection_status_label, 1)
         layout.addWidget(connection_group)
 
         layout.addWidget(self._build_database_panel())
@@ -1040,116 +207,102 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        layout.addWidget(self._build_mapping_panel())
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self._build_mapping_panel())
+        splitter.addWidget(self._build_preview_panel())
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(splitter)
         return tab
 
     # Excel panel
     def _build_excel_panel(self) -> QWidget:
         panel = QGroupBox("Excel")
         layout = QVBoxLayout(panel)
-        layout.setSpacing(16)
+
+        path_layout = QHBoxLayout()
+        self.excel_path_label = QLabel("Nenhum arquivo selecionado")
+        self.excel_path_label.setWordWrap(True)
+        path_layout.addWidget(self.excel_path_label)
+
+        self.import_excel_btn = QPushButton("Importar Excel")
+        self.import_excel_btn.clicked.connect(self._choose_excel)
+        path_layout.addWidget(self.import_excel_btn)
+        layout.addLayout(path_layout)
 
         self.sheet_list = QListWidget()
-        self.sheet_list.hide()
         self.sheet_list.itemSelectionChanged.connect(self._on_sheet_selected)
+        layout.addWidget(QLabel("Abas"))
         layout.addWidget(self.sheet_list)
 
-        selection_card = QFrame()
-        selection_card.setProperty("card", True)
-        selection_layout = QVBoxLayout(selection_card)
-        selection_layout.setContentsMargins(18, 18, 18, 18)
-        selection_layout.setSpacing(10)
-
-        selection_title = QLabel("Selecao atual da planilha")
-        selection_title.setProperty("role", "card-title")
-        selection_layout.addWidget(selection_title)
-
-        selection_text = QLabel(
-            "Use a janela dedicada do Excel para definir aba, cabecalho, linhas e colunas."
-        )
-        selection_text.setProperty("role", "muted")
-        selection_text.setWordWrap(True)
-        selection_layout.addWidget(selection_text)
-
-        self.advanced_file_label = QLabel("Arquivo atual: nenhum")
-        self.advanced_file_label.setWordWrap(True)
-        selection_layout.addWidget(self.advanced_file_label)
-
-        self.advanced_sheet_label = QLabel("Aba atual: nenhuma")
-        self.advanced_sheet_label.setWordWrap(True)
-        selection_layout.addWidget(self.advanced_sheet_label)
-
-        self.advanced_selection_label = QLabel("Recorte confirmado: nenhum")
-        self.advanced_selection_label.setWordWrap(True)
-        selection_layout.addWidget(self.advanced_selection_label)
-
-        selection_actions = QHBoxLayout()
-        self.choose_advanced_file_btn = QPushButton("Escolher planilha")
-        self.choose_advanced_file_btn.clicked.connect(self._choose_excel)
-        selection_actions.addWidget(self.choose_advanced_file_btn)
-
-        self.open_advanced_selection_btn = QPushButton("Abrir seletor do Excel")
-        self.open_advanced_selection_btn.setProperty("variant", "primary")
-        self.open_advanced_selection_btn.clicked.connect(self._open_excel_selection_dialog)
-        selection_actions.addWidget(self.open_advanced_selection_btn)
-
-        self.refresh_sheet_btn = QPushButton("Recarregar aba")
-        self.refresh_sheet_btn.clicked.connect(self._refresh_sheet_preview)
-        selection_actions.addWidget(self.refresh_sheet_btn)
-        selection_actions.addStretch()
-        selection_layout.addLayout(selection_actions)
-        layout.addWidget(selection_card)
-
-        manual_group = QGroupBox("Ajustes manuais do intervalo")
-        manual_layout = QVBoxLayout(manual_group)
-        manual_layout.setSpacing(12)
-
-        header_grid = QGridLayout()
-        header_grid.setHorizontalSpacing(12)
-        header_grid.setVerticalSpacing(12)
+        header_layout = QHBoxLayout()
         self.header_row_spin = QSpinBox()
         self.header_row_spin.setMinimum(1)
+        self.header_row_spin.setMaximum(1_048_576)
         self.header_row_spin.setValue(1)
-        header_grid.addWidget(QLabel("Linha do cabecalho"), 0, 0)
-        header_grid.addWidget(self.header_row_spin, 0, 1)
+        header_layout.addWidget(QLabel("Linha do cabecalho"))
+        header_layout.addWidget(self.header_row_spin)
+        layout.addLayout(header_layout)
 
-        self.row_start_spin = QSpinBox()
-        self.row_start_spin.setMinimum(0)
-        self.row_start_spin.setValue(0)
-        header_grid.addWidget(QLabel("Linha inicial dos dados"), 0, 2)
-        header_grid.addWidget(self.row_start_spin, 0, 3)
+        data_range_layout = QHBoxLayout()
+        self.data_start_row_spin = QSpinBox()
+        self.data_start_row_spin.setMinimum(0)
+        self.data_start_row_spin.setMaximum(1_048_576)
+        self.data_start_row_spin.setValue(0)
+        self.data_end_row_spin = QSpinBox()
+        self.data_end_row_spin.setMinimum(0)
+        self.data_end_row_spin.setMaximum(1_048_576)
+        self.data_end_row_spin.setValue(0)
+        data_range_layout.addWidget(QLabel("Linha inicial dos dados (0 = apos cabecalho)"))
+        data_range_layout.addWidget(self.data_start_row_spin)
+        data_range_layout.addWidget(QLabel("Linha final (0 = ate o fim)"))
+        data_range_layout.addWidget(self.data_end_row_spin)
+        layout.addLayout(data_range_layout)
 
-        self.row_end_spin = QSpinBox()
-        self.row_end_spin.setMinimum(0)
-        self.row_end_spin.setValue(0)
-        header_grid.addWidget(QLabel("Linha final dos dados"), 1, 0)
-        header_grid.addWidget(self.row_end_spin, 1, 1)
-
+        range_layout = QHBoxLayout()
         self.col_start_spin = QSpinBox()
         self.col_start_spin.setMinimum(1)
+        self.col_start_spin.setMaximum(16_384)
         self.col_start_spin.setValue(1)
-        header_grid.addWidget(QLabel("Coluna inicial"), 1, 2)
-        header_grid.addWidget(self.col_start_spin, 1, 3)
-
         self.col_end_spin = QSpinBox()
         self.col_end_spin.setMinimum(0)
+        self.col_end_spin.setMaximum(16_384)
         self.col_end_spin.setValue(0)
-        header_grid.addWidget(QLabel("Coluna final"), 1, 4)
-        header_grid.addWidget(self.col_end_spin, 1, 5)
-        manual_layout.addLayout(header_grid)
+        range_layout.addWidget(QLabel("Coluna inicial"))
+        range_layout.addWidget(self.col_start_spin)
+        range_layout.addWidget(QLabel("Coluna final (0 = ate o fim)"))
+        range_layout.addWidget(self.col_end_spin)
+        layout.addLayout(range_layout)
+
+        preview_buttons = QHBoxLayout()
+        self.open_excel_selection_btn = QPushButton("Selecionar dados em tela cheia")
+        self.open_excel_selection_btn.clicked.connect(self._open_excel_selection_dialog)
+        preview_buttons.addWidget(self.open_excel_selection_btn)
+
+        self.refresh_sheet_btn = QPushButton("Pre-visualizar")
+        self.refresh_sheet_btn.clicked.connect(self._refresh_sheet_preview)
+        preview_buttons.addWidget(self.refresh_sheet_btn)
+
+        self.use_range_btn = QPushButton("Usar selecao p/ Inicio/Fim")
+        self.use_range_btn.clicked.connect(self._apply_selection_to_range)
+        preview_buttons.addWidget(self.use_range_btn)
+
+        self.use_header_btn = QPushButton("Usar selecao como cabecalho")
+        self.use_header_btn.clicked.connect(self._apply_selection_to_header)
+        preview_buttons.addWidget(self.use_header_btn)
+        layout.addLayout(preview_buttons)
 
         self.selection_info_label = QLabel(self._selection_hint_text())
         self.selection_info_label.setWordWrap(True)
-        manual_layout.addWidget(self.selection_info_label)
+        layout.addWidget(self.selection_info_label)
 
-        manual_actions = QHBoxLayout()
-        self.use_range_btn = QPushButton("Resumo do recorte")
-        self.use_range_btn.setEnabled(False)
-        manual_actions.addWidget(self.use_range_btn)
-        manual_actions.addStretch()
-        manual_layout.addLayout(manual_actions)
-
-        layout.addWidget(manual_group)
+        self.sheet_preview_table = QTableWidget()
+        self.sheet_preview_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.sheet_preview_table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.sheet_preview_table.setAlternatingRowColors(True)
+        self.sheet_preview_table.itemSelectionChanged.connect(self._update_selection_info)
+        layout.addWidget(self.sheet_preview_table)
         return panel
 
     # Database panel
@@ -1170,39 +323,25 @@ class MainWindow(QMainWindow):
     # Mapping panel
     def _build_mapping_panel(self) -> QWidget:
         panel = QGroupBox("Mapeamento")
-        content_layout = QVBoxLayout(panel)
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(12)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
         content_layout.setSpacing(12)
 
-        content_layout.addWidget(self._build_primary_key_section())
         content_layout.addWidget(self._build_mapping_section())
         content_layout.addWidget(self._build_defaults_and_fk_section())
         content_layout.addWidget(self._build_operations_section())
         content_layout.addStretch()
 
+        scroll_area.setWidget(content)
+        layout.addWidget(scroll_area)
+
         return panel
-
-    def _build_primary_key_section(self) -> QWidget:
-        section = QGroupBox("Chave primaria / codigo")
-        section_layout = QVBoxLayout(section)
-        section_layout.setSpacing(8)
-
-        self.pk_summary_label = QLabel("Selecione uma tabela para identificar a chave primaria.")
-        self.pk_summary_label.setWordWrap(True)
-        section_layout.addWidget(self.pk_summary_label)
-
-        self.pk_auto_checkbox = QCheckBox("Banco gera automaticamente esta chave no INSERT")
-        self.pk_auto_checkbox.setEnabled(False)
-        self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
-        section_layout.addWidget(self.pk_auto_checkbox)
-
-        self.pk_hint_label = QLabel(
-            "Quando esta opcao estiver marcada, a coluna de chave nao sera enviada para o banco."
-        )
-        self.pk_hint_label.setWordWrap(True)
-        self.pk_hint_label.setProperty("role", "muted")
-        section_layout.addWidget(self.pk_hint_label)
-
-        return section
 
     def _build_mapping_section(self) -> QWidget:
         section = QWidget()
@@ -1232,6 +371,11 @@ class MainWindow(QMainWindow):
         self.required_columns_label = QLabel("Campos obrigatorios: --")
         self.required_columns_label.setWordWrap(True)
         section_layout.addWidget(self.required_columns_label)
+
+        self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
+        self.pk_auto_checkbox.setEnabled(False)
+        self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
+        section_layout.addWidget(self.pk_auto_checkbox)
 
         return section
 
@@ -1425,370 +569,71 @@ class MainWindow(QMainWindow):
     # Actions
     def _choose_excel(self) -> None:
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Selecione o arquivo Excel", str(Path.home()), "Planilhas (*.xls *.xlsx *.xlsm)"
+            self, "Selecione o arquivo Excel", str(Path.home()), "Planilhas (*.xlsx *.xlsm *.xls)"
         )
         if not file_name:
             return
-        self._load_excel_file(
-            Path(file_name),
-            open_dialog=True,
-            use_profile=self._quick_mode == "quick" and bool(self.loaded_profile_id),
-        )
-
-    def _load_excel_file(self, file_path: Path, *, open_dialog: bool = False, use_profile: bool = False) -> None:
-        self.excel_file_path = file_path
+        self.excel_path_label.setText(file_name)
+        self.excel_file_path = Path(file_name)
         try:
-            self.excel_reader = ExcelReader(str(file_path))
+            self.excel_reader = ExcelReader(file_name)
+            self._manual_excel_selection_confirmed = False
             self._relation_conversions = {}
             self._refresh_fk_conversion_hint()
             self.sheet_list.clear()
             for name in self.excel_reader.sheet_names():
                 self.sheet_list.addItem(name)
             self._set_excel_step_ready(False)
-            self._excel_grid_model.clear()
-            self._excel_dataframe = None
-            self._excel_grid_headers = []
-            self._excel_grid_selection_model.clearSelection()
+            self.sheet_preview_table.clear()
+            self.sheet_preview_table.setRowCount(0)
+            self.sheet_preview_table.setColumnCount(0)
             self.selection_info_label.setText(self._selection_hint_text())
             self.sheet_columns_list.clear()
             self._refresh_fk_excel_options()
             self._clear_pre_validation_state()
-            self._last_validation_result = None
-            self._last_import_result = None
-            self._last_profile_preview = ""
-            for workspace in self._all_excel_workspaces():
-                workspace.set_file_path(file_path)
-                workspace.set_loading("Carregando planilha...", "Preparando abas e intervalo inicial.")
-
-            if not use_profile:
-                self.loaded_profile_id = None
-
-            selected_profile: ImportProfile | None = None
-            target_sheet = None
-            selected_profile_id = self._selected_profile_id() if use_profile else None
-            if selected_profile_id:
-                try:
-                    selected_profile = load_profile(selected_profile_id)
-                    target_sheet = selected_profile.sheet_name
-                except FileNotFoundError:
-                    target_sheet = None
-                    selected_profile = None
-
-            if selected_profile is not None:
-                self.header_row_spin.setValue(selected_profile.header_row)
-                self.row_start_spin.setValue(selected_profile.data_start_row or 0)
-                self.row_end_spin.setValue(selected_profile.data_end_row or 0)
-                self.col_start_spin.setValue(selected_profile.col_start or 1)
-                self.col_end_spin.setValue(selected_profile.col_end or 0)
-                self._applied_excel_selection = ExcelSelectionResult(
-                    header_row=selected_profile.header_row,
-                    data_start_row=selected_profile.data_start_row or (selected_profile.header_row + 1),
-                    data_end_row=selected_profile.data_end_row or (selected_profile.data_start_row or (selected_profile.header_row + 1)),
-                    col_start=selected_profile.col_start or 1,
-                    col_end=selected_profile.col_end or (selected_profile.col_start or 1),
-                    selected_columns=[],
-                )
-            else:
-                self.header_row_spin.setValue(1)
-                self.row_start_spin.setValue(2)
-                self.row_end_spin.setValue(0)
-                self.col_start_spin.setValue(1)
-                self.col_end_spin.setValue(0)
-                self._applied_excel_selection = None
-
-            self.sheet_list.blockSignals(True)
-            if target_sheet:
-                matching_items = self.sheet_list.findItems(target_sheet, Qt.MatchExactly)
-                if matching_items:
-                    self.sheet_list.setCurrentItem(matching_items[0])
-            if not self.sheet_list.selectedItems() and self.sheet_list.count() > 0:
-                self.sheet_list.setCurrentRow(0)
-            self.sheet_list.blockSignals(False)
-            if self.sheet_list.selectedItems():
-                self._on_sheet_selected()
-            self._update_profile_summary()
-            self._sync_quick_workflow_state()
-            if open_dialog:
-                self._open_excel_selection_dialog()
+            self._open_excel_selection_dialog()
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao abrir Excel", exc)
 
-    def _refresh_profile_options(self) -> None:
-        current_profile_id = self.profile_combo.currentData() if hasattr(self, "profile_combo") else None
-        profiles = list_profiles()
-        self._available_profiles = profiles
-        self.profile_combo.clear()
-        for profile in profiles:
-            self.profile_combo.addItem(profile.name, profile.id)
-        if current_profile_id:
-            for index in range(self.profile_combo.count()):
-                if self.profile_combo.itemData(index) == current_profile_id:
-                    self.profile_combo.setCurrentIndex(index)
-                    break
-        self._update_profile_summary()
-        self._sync_quick_workflow_state()
-
-    def _on_profile_combo_changed(self) -> None:
-        current_profile_id = self.profile_combo.currentData()
-        if self.loaded_profile_id and current_profile_id and str(current_profile_id) != self.loaded_profile_id:
-            self.loaded_profile_id = None
-        self._update_profile_summary()
-        self._sync_quick_workflow_state()
-
-    def _selected_profile_id(self) -> str | None:
-        profile_id = self.loaded_profile_id
-        if not profile_id:
-            return None
-        return str(profile_id)
-
-    def _apply_selected_profile(self) -> None:
-        profile_id = self.profile_combo.currentData()
-        if not profile_id:
-            QMessageBox.warning(self, "Modelo", "Nenhum modelo salvo selecionado.")
+    def _open_excel_selection_dialog(self) -> None:
+        if not self.excel_reader:
+            QMessageBox.warning(self, "Excel", "Importe um arquivo Excel antes de selecionar os dados.")
             return
-        profile = load_profile(str(profile_id))
-        self._apply_profile(profile)
-
-    def _apply_profile(self, profile: ImportProfile) -> None:
-        self.loaded_profile_id = profile.id
-        self.profile_id_edit.setText(profile.id)
-        self.profile_name_edit.setText(profile.name)
-        self.profile_target_combo.setCurrentText(profile.target_type)
-        self.profile_filial_spin.setValue(profile.filial_id or 0)
-        self.profile_usuario_spin.setValue(profile.usuario_id or 0)
-        self.header_row_spin.setValue(profile.header_row)
-        self.row_start_spin.setValue(profile.data_start_row or 0)
-        self.row_end_spin.setValue(profile.data_end_row or 0)
-        self.col_start_spin.setValue(profile.col_start or 1)
-        self.col_end_spin.setValue(profile.col_end or 0)
-        self._applied_excel_selection = ExcelSelectionResult(
-            header_row=profile.header_row,
-            data_start_row=profile.data_start_row or (profile.header_row + 1),
-            data_end_row=profile.data_end_row or (profile.data_start_row or (profile.header_row + 1)),
-            col_start=profile.col_start or 1,
-            col_end=profile.col_end or (profile.col_start or 1),
-            selected_columns=[],
-        )
-        self._last_validation_result = None
-        self._last_import_result = None
-        self._last_profile_preview = ""
-
-        if self.excel_reader:
-            matching_items = self.sheet_list.findItems(profile.sheet_name, Qt.MatchExactly)
-            if matching_items:
-                self.sheet_list.setCurrentItem(matching_items[0])
-            self._refresh_sheet_preview()
-        self._update_profile_summary(profile)
-        self._sync_quick_workflow_state()
-
-    def _build_profile_from_ui(self) -> ImportProfile | None:
-        profile_id = self.profile_id_edit.text().strip()
-        profile_name = self.profile_name_edit.text().strip()
-        base_profile: ImportProfile | None = None
-        selected_profile_id = self._selected_profile_id()
-        if selected_profile_id:
-            try:
-                base_profile = load_profile(selected_profile_id)
-            except FileNotFoundError:
-                base_profile = None
-
-        sheet_name = base_profile.sheet_name if base_profile else ""
+        initial_sheet = None
         selected_items = self.sheet_list.selectedItems()
         if selected_items:
-            sheet_name = selected_items[0].text()
+            initial_sheet = selected_items[0].text()
+        elif self.sheet_list.count() > 0:
+            initial_sheet = self.sheet_list.item(0).text()
 
-        if not sheet_name:
-            QMessageBox.warning(self, "Modelo", "Selecione uma aba da planilha para salvar o modelo.")
-            return None
-        if not profile_id:
-            QMessageBox.warning(self, "Modelo", "Informe o ID do modelo.")
-            return None
-        if not profile_name:
-            QMessageBox.warning(self, "Modelo", "Informe o nome do modelo.")
-            return None
-
-        defaults = dict(base_profile.defaults if base_profile else {})
-        defaults["usuario_id"] = self.profile_usuario_spin.value() or None
-
-        return ImportProfile(
-            id=profile_id,
-            name=profile_name,
-            target_type=self.profile_target_combo.currentText(),
-            description=base_profile.description if base_profile else None,
-            sheet_name=sheet_name,
+        dialog = ExcelSelectionDialog(
+            self,
+            self.excel_reader,
+            initial_sheet=initial_sheet,
             header_row=self._current_header_excel_row(),
-            data_start_row=self.row_start_spin.value() or None,
-            data_end_row=self.row_end_spin.value() or None,
-            col_start=self.col_start_spin.value() or None,
+            data_end_row=self.data_end_row_spin.value() or None,
+            col_start=self.col_start_spin.value(),
             col_end=self.col_end_spin.value() or None,
-            filial_id=self.profile_filial_spin.value() or None,
-            usuario_id=self.profile_usuario_spin.value() or None,
-            source_key_strategy=list(base_profile.source_key_strategy if base_profile else []),
-            field_map=dict(base_profile.field_map if base_profile else {}),
-            defaults=defaults,
-            filters=dict(base_profile.filters if base_profile else {}),
-            unit_rules=list(base_profile.unit_rules if base_profile else []),
-            table_name=base_profile.table_name if base_profile else None,
-            operation=base_profile.operation if base_profile else None,
         )
+        if dialog.exec() and dialog.result:
+            self._apply_excel_selection(dialog.result)
 
-    def _save_current_profile(self) -> None:
-        profile = self._build_profile_from_ui()
-        if not profile:
-            return
-        save_path = save_profile(profile)
-        self.loaded_profile_id = profile.id
-        self._refresh_profile_options()
-        self._update_profile_summary(profile)
-        QMessageBox.information(self, "Modelo", f"Modelo salvo em:\n{save_path}")
+    def _apply_excel_selection(self, selection) -> None:
+        matching_items = self.sheet_list.findItems(selection.sheet_name, Qt.MatchExactly)
+        self.sheet_list.blockSignals(True)
+        self.sheet_list.clearSelection()
+        if matching_items:
+            matching_items[0].setSelected(True)
+            self.sheet_list.setCurrentItem(matching_items[0])
+        self.sheet_list.blockSignals(False)
 
-    def _connection_payload(self) -> Dict[str, Any] | None:
-        host = self.host_edit.text().strip()
-        database = self.db_edit.text().strip()
-        user = self.user_edit.text().strip()
-        password = self.pwd_edit.text()
-        if not all([host, database, user]):
-            QMessageBox.warning(
-                self,
-                "Banco",
-                "Preencha host, database, usuario e senha na conexao antes de importar para o Xerife.",
-            )
-            return None
-        return {
-            "host": host,
-            "port": int(self.port_edit.text() or "5432"),
-            "database": database,
-            "user": user,
-            "password": password,
-            "adminUser": user,
-            "adminPassword": password,
-            "mode": "online",
-        }
-
-    def _validate_profile(self, *, show_blocking_dialog: bool = False) -> XerifeValidationResult | None:
-        if not self.excel_reader:
-            QMessageBox.warning(self, "Importacao", "Escolha a planilha antes de validar o modelo.")
-            return None
-        if not self._applied_excel_selection:
-            QMessageBox.warning(
-                self,
-                "Importacao",
-                "Confirme a aba e o recorte na janela do Excel antes de validar o modelo.",
-            )
-            return None
-        profile = self._build_profile_from_ui()
-        if not profile:
-            return None
-        if profile.target_type != "xerife_stock":
-            QMessageBox.warning(self, "Importacao", f"Alvo rapido nao suportado: {profile.target_type}")
-            return None
-
-        try:
-            validation = XerifeStockImporter(self.excel_reader, profile).validate()
-            self._last_validation_result = validation
-            self._last_import_result = None
-            self._last_profile_preview = validation.preview_text()
-            self._update_profile_summary(profile)
-            self._sync_quick_workflow_state()
-            if validation.issues and show_blocking_dialog:
-                QMessageBox.warning(
-                    self,
-                    "Validacao",
-                    f"Foram encontrados {len(validation.issues)} erro(s) bloqueantes. Corrija-os antes de importar.",
-                )
-            return validation
-        except Exception as exc:  # noqa: BLE001
-            self._show_error("Erro ao validar o perfil do Xerife", exc)
-            return None
-
-    def _validate_profile_only(self) -> None:
-        validation = self._validate_profile(show_blocking_dialog=False)
-        if validation is None:
-            return
-        self.quick_page.set_step(2)
-
-    def _import_validated_profile(self, *, show_summary_dialog: bool = False) -> None:
-        validation = self._last_validation_result
-        if validation is None:
-            validation = self._validate_profile(show_blocking_dialog=False)
-        if validation is None:
-            return
-        if validation.issues:
-            self.quick_page.set_step(2)
-            return
-
-        connection = self._connection_payload()
-        if connection is None:
-            self.quick_page.set_step(3)
-            return
-
-        confirmation_lines = [f"Enviar {validation.importable_rows} item(ns) validados para o Xerife?"]
-        if validation.skipped_rows:
-            confirmation_lines.append(
-                f"{validation.skipped_rows} linha(s) serao descartadas pelas regras do perfil e nao serao importadas."
-            )
-        confirmation = QMessageBox.question(self, "Importar para o Xerife", "\n".join(confirmation_lines))
-        if confirmation != QMessageBox.Yes:
-            return
-
-        try:
-            result = run_xerife_stock_batch(
-                connection=connection,
-                items=validation.prepared_items,
-                run_id=uuid4().hex[:12],
-            )
-            self._last_import_result = result
-            result_lines = [
-                validation.preview_text(),
-                "",
-                "Resultado do lote Xerife:",
-                f"Criados: {result.get('created', 0)}",
-                f"Atualizados: {result.get('updated', 0)}",
-                f"Ajustados: {result.get('adjusted', 0)}",
-            ]
-            result_items = result.get("items", [])
-            if result_items:
-                result_lines.extend(["", pd.DataFrame(result_items[:20]).to_string(index=False)])
-            result_text = "\n".join(result_lines)
-            self.quick_page.validation_details.setPlainText(result_text)
-            self.quick_page.set_step(3)
-            self._sync_quick_workflow_state()
-            if show_summary_dialog:
-                QMessageBox.information(
-                    self,
-                    "Importacao",
-                    (
-                        f"Importacao concluida.\nCriados: {result.get('created', 0)}\n"
-                        f"Atualizados: {result.get('updated', 0)}\n"
-                        f"Descartados pelo perfil: {validation.skipped_rows}"
-                    ),
-                )
-        except Exception as exc:  # noqa: BLE001
-            self._show_error("Erro ao importar para o Xerife", exc)
-
-    def _validate_and_import_profile(self) -> None:
-        validation = self._validate_profile(show_blocking_dialog=True)
-        if not validation or not validation.can_import:
-            return
-        self._import_validated_profile(show_summary_dialog=True)
-
-    def _update_profile_summary(self, profile: ImportProfile | None = None) -> None:
-        current_profile = profile
-        if current_profile is None:
-            selected_profile_id = self._selected_profile_id()
-            if selected_profile_id:
-                try:
-                    current_profile = load_profile(selected_profile_id)
-                except FileNotFoundError:
-                    current_profile = None
-
-        file_text = str(self.excel_file_path) if self.excel_file_path else "sem planilha"
-        if current_profile:
-            summary = f"{current_profile.summary} | arquivo={file_text}"
-        else:
-            summary = f"Sem modelo aplicado | arquivo={file_text}"
-        self.profile_summary_label.setText(summary)
-        self._sync_quick_workflow_state()
+        self.header_row_spin.setValue(selection.header_row)
+        self.data_start_row_spin.setValue(selection.data_start_row)
+        self.data_end_row_spin.setValue(selection.data_end_row or 0)
+        self.col_start_spin.setValue(selection.col_start)
+        self.col_end_spin.setValue(selection.col_end or 0)
+        self._manual_excel_selection_confirmed = True
+        self._refresh_sheet_preview()
 
     def _open_connection_dialog(self) -> None:
         dialog = QDialog(self)
@@ -1835,19 +680,13 @@ class MainWindow(QMainWindow):
             self._foreign_columns_cache = {}
             self._load_tables()
             connection_text = f"Conectado: {user or 'usuário'}@{host}:{port}/{database}"
-            self._set_connection_status(connection_text, connected=True)
-            if hasattr(self, "database_status_copy_label"):
-                self.database_status_copy_label.setText(connection_text)
-            self._sync_quick_workflow_state()
+            self.connection_status_label.setText(connection_text)
             QMessageBox.information(self, "Banco", "Conexão realizada com sucesso")
             return True
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao conectar", exc)
-            self._set_connection_status("Erro ao conectar", connected=False, tone="danger")
-            if hasattr(self, "database_status_copy_label"):
-                self.database_status_copy_label.setText("Erro ao conectar")
+            self.connection_status_label.setText("Erro ao conectar")
             self._set_db_step_ready(False)
-            self._sync_quick_workflow_state()
             return False
 
     def _load_tables(self) -> None:
@@ -1861,20 +700,16 @@ class MainWindow(QMainWindow):
         items = self.sheet_list.selectedItems()
         if not items:
             self._set_excel_step_ready(False)
-            self._update_profile_summary()
             return
         self._clear_pre_validation_state()
         self._refresh_sheet_preview()
-        self._update_profile_summary()
 
     def _refresh_sheet_preview(self) -> None:
         self._set_excel_step_ready(False)
         if not self.excel_reader:
-            self._sync_quick_workflow_state()
             return
         items = self.sheet_list.selectedItems()
         if not items:
-            self._sync_quick_workflow_state()
             return
         sheet_name = items[0].text()
         col_start = self.col_start_spin.value()
@@ -1884,273 +719,180 @@ class MainWindow(QMainWindow):
             self.col_end_spin.setValue(0)
         header_excel_row = self._current_header_excel_row()
         data_start_row = self._current_data_start_excel_row(header_excel_row)
-        data_end_row = self.row_end_spin.value() or None
-        if data_end_row is not None and data_end_row < data_start_row:
-            data_end_row = None
-            self.row_end_spin.setValue(0)
-        self._start_excel_grid_load(
-            sheet_name=sheet_name,
-            header_row=header_excel_row,
-            data_start_row=data_start_row,
-            data_end_row=data_end_row,
-            col_start=col_start,
-            col_end=col_end,
-        )
-
-    def _start_excel_grid_load(
-        self,
-        *,
-        sheet_name: str,
-        header_row: int,
-        data_start_row: int,
-        data_end_row: int | None,
-        col_start: int | None,
-        col_end: int | None,
-    ) -> None:
-        if not self.excel_reader:
-            return
-        self._excel_load_job_id += 1
-        job_id = self._excel_load_job_id
-        self._excel_grid_model.clear()
-        self._excel_dataframe = None
-        self._excel_grid_headers = []
-        self._excel_grid_selection_model.clearSelection()
-        for workspace in self._all_excel_workspaces():
-            workspace.set_loading("Carregando planilha...", f"Aba {sheet_name}: preparando grade.")
-
-        worker = ExcelLoadWorker(
-            reader=self.excel_reader,
-            sheet_name=sheet_name,
-            header_row=header_row,
-            data_start_row=data_start_row,
-            data_end_row=data_end_row,
-            col_start=col_start,
-            col_end=col_end,
-        )
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.started.connect(lambda message, current_job=job_id: self._on_excel_load_started(current_job, message))
-        worker.first_chunk_ready.connect(
-            lambda headers, rows, first_row, total_rows, current_job=job_id: self._on_excel_first_chunk(
-                current_job,
-                headers,
-                rows,
-                first_row,
-                total_rows,
+        data_end_row = self._current_data_end_excel_row(data_start_row)
+        try:
+            preview = self.excel_reader.load_sheet_preview(
+                sheet_name,
+                header_row=header_excel_row,
+                data_start_row=data_start_row,
+                data_end_row=data_end_row,
+                col_start=col_start,
+                col_end=col_end,
             )
-        )
-        worker.rows_appended.connect(
-            lambda rows, current_job=job_id: self._on_excel_rows_appended(current_job, rows)
-        )
-        worker.finished.connect(
-            lambda dataframe, headers, loaded_header_row, first_row, total_rows, total_cols, current_job=job_id:
-            self._on_excel_load_finished(
-                current_job,
-                dataframe,
-                headers,
-                loaded_header_row,
-                first_row,
-                total_rows,
-                total_cols,
-            )
-        )
-        worker.failed.connect(lambda message, current_job=job_id: self._on_excel_load_failed(current_job, message))
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(
-            lambda current_thread=thread, current_worker=worker: self._clear_excel_load_worker_refs(
-                current_thread,
-                current_worker,
-            )
-        )
-        self._excel_load_worker = worker
-        self._excel_load_thread = thread
-        thread.start()
+            if not self._manual_excel_selection_confirmed and self._maybe_promote_first_data_row_as_header(
+                preview, header_excel_row
+            ):
+                return
+            first_data_row = data_start_row
+            self._populate_sheet_preview(preview, first_data_row)
+            self.sheet_columns_list.clear()
+            for col in preview.columns:
+                self.sheet_columns_list.addItem(col)
+            self._refresh_fk_excel_options()
+            self._set_excel_step_ready(True)
+        except Exception as exc:  # noqa: BLE001
+            self._show_error("Erro ao pre-visualizar", exc)
 
-    def _clear_excel_load_worker_refs(self, thread: QThread, worker: ExcelLoadWorker) -> None:
-        if self._excel_load_thread is thread:
-            self._excel_load_thread = None
-        if self._excel_load_worker is worker:
-            self._excel_load_worker = None
+    def _maybe_promote_first_data_row_as_header(self, preview: SheetPreview, current_header_row: int) -> bool:
+        """If columns are placeholders and first data row seems to be the real header, move header down by 1."""
+        if not preview.columns or not preview.sample.shape[0]:
+            return False
+        placeholders = all(str(col).startswith("Coluna_") for col in preview.columns)
+        if not placeholders:
+            return False
+        first_row = preview.sample.iloc[0]
+        values = [str(v).strip() for v in first_row.tolist() if v is not None and str(v).strip() != ""]
+        if not values:
+            return False
+        if all(val.startswith("Coluna_") for val in values):
+            return False
+        new_header_row = current_header_row + 1
+        if new_header_row == current_header_row:
+            return False
+        # Update spin and rerun preview with the next row as header.
+        self.header_row_spin.setValue(new_header_row)
+        self._refresh_sheet_preview()
+        return True
 
-    def _on_excel_load_started(self, job_id: int, message: str) -> None:
-        if job_id != self._excel_load_job_id:
-            return
-        for workspace in self._all_excel_workspaces():
-            workspace.set_loading("Carregando planilha...", message)
-
-    def _on_excel_first_chunk(
-        self,
-        job_id: int,
-        headers: list[str],
-        rows: list[list[str]],
-        first_data_row: int,
-        total_rows: int,
-    ) -> None:
-        if job_id != self._excel_load_job_id:
-            return
-        self._excel_grid_headers = list(headers)
-        self._excel_grid_first_data_row = first_data_row
+    def _populate_sheet_preview(self, preview: SheetPreview, first_data_row: int) -> None:
+        df = preview.sample
+        self._current_header_excel_row_value = preview.header_row
         self._current_first_data_row = first_data_row
-        self._excel_grid_model.reset_content(headers, rows, first_data_row)
-        self.sheet_columns_list.clear()
-        for column_name in headers:
-            self.sheet_columns_list.addItem(column_name)
-        self._refresh_fk_excel_options()
-        if total_rows:
-            status_text = f"Montando grade... {len(rows)}/{total_rows} linhas"
-        else:
-            status_text = "Intervalo vazio. Ajuste o recorte."
-        for workspace in self._all_excel_workspaces():
-            workspace.show_table(status_text=status_text, tone="warning" if total_rows else "danger")
+
+        self.sheet_preview_table.clear()
+        total_rows = len(df.index)
+        if total_rows <= 0:
+            self.sheet_preview_table.setRowCount(0)
+            self.sheet_preview_table.setColumnCount(0)
+            self.selection_info_label.setText("Nenhum dado no intervalo atual. Ajuste cabecalho/colunas.")
+            return
+
+        self.sheet_preview_table.setRowCount(total_rows)
+        self.sheet_preview_table.setColumnCount(len(preview.columns))
+        self.sheet_preview_table.setHorizontalHeaderLabels(preview.columns)
+
+        row_labels = [str(first_data_row + idx) for idx in range(len(df.index))]
+        self.sheet_preview_table.setVerticalHeaderLabels(row_labels)
+
+        for row_idx, (_, row) in enumerate(df.iterrows(), start=0):
+            for col_idx, value in enumerate(row):
+                item = QTableWidgetItem("" if value is None else str(value))
+                self.sheet_preview_table.setItem(row_idx, col_idx, item)
+
+        header = self.sheet_preview_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        self.sheet_preview_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._update_selection_info()
-        self._sync_excel_workspaces()
-
-    def _on_excel_rows_appended(self, job_id: int, rows: list[list[str]]) -> None:
-        if job_id != self._excel_load_job_id:
-            return
-        self._excel_grid_model.append_rows(rows)
-        current_rows = self._excel_grid_model.rowCount()
-        for workspace in self._all_excel_workspaces():
-            workspace.set_status(f"Montando grade... {current_rows} linhas", tone="warning")
-
-    def _on_excel_load_finished(
-        self,
-        job_id: int,
-        dataframe: pd.DataFrame,
-        headers: list[str],
-        header_row: int,
-        first_data_row: int,
-        total_rows: int,
-        total_cols: int,
-    ) -> None:
-        if job_id != self._excel_load_job_id:
-            return
-        self._excel_dataframe = dataframe
-        self._excel_grid_headers = list(headers)
-        self._excel_grid_header_row = header_row
-        self._excel_grid_first_data_row = first_data_row
-        self._current_header_excel_row_value = header_row
-        self._current_first_data_row = first_data_row
-        self._set_excel_step_ready(True)
-        self._sync_quick_workflow_state()
-        if total_rows <= 0 or total_cols <= 0:
-            self.selection_info_label.setText("Nenhum dado no intervalo atual. Ajuste cabecalho, linhas ou colunas.")
-            for workspace in self._all_excel_workspaces():
-                workspace.show_table(status_text="Sem dados no intervalo atual.", tone="danger")
-            return
-        ready_text = f"Grade pronta: {total_rows} linhas x {total_cols} colunas."
-        for workspace in self._all_excel_workspaces():
-            workspace.show_table(status_text=ready_text, tone="success")
-        self._update_selection_info()
-        self._sync_excel_workspaces()
-
-    def _on_excel_load_failed(self, job_id: int, message: str) -> None:
-        if job_id != self._excel_load_job_id:
-            return
-        for workspace in self._all_excel_workspaces():
-            workspace.set_loading("Falha ao abrir a grade", message)
-            workspace.set_status("Falha ao carregar planilha", tone="danger")
-        QMessageBox.warning(self, "Excel", message)
-        self._sync_quick_workflow_state()
-
-    def _current_excel_selection(self) -> ExcelSelectionResult | None:
-        selection = self._excel_grid_selection_model.selection()
-        if selection.isEmpty():
-            return None
-        min_row = min(item.top() for item in selection)
-        max_row = max(item.bottom() for item in selection)
-        min_col = min(item.left() for item in selection)
-        max_col = max(item.right() for item in selection)
-        current_col_start = self.col_start_spin.value() or 1
-        selected_columns = self._excel_grid_headers[min_col : max_col + 1]
-        return ExcelSelectionResult(
-            header_row=self._current_header_excel_row(),
-            data_start_row=self._excel_row_from_table_row(min_row),
-            data_end_row=self._excel_row_from_table_row(max_row),
-            col_start=current_col_start + min_col,
-            col_end=current_col_start + max_col,
-            selected_columns=selected_columns,
-        )
 
     def _apply_selection_to_range(self) -> None:
-        selection = self._current_excel_selection()
-        if not selection:
+        ranges = self.sheet_preview_table.selectedRanges()
+        if not ranges:
             return
-        self._applied_excel_selection = selection
-        self.row_start_spin.setValue(selection.data_start_row)
-        self.row_end_spin.setValue(selection.data_end_row)
-        self.col_start_spin.setValue(selection.col_start)
-        self.col_end_spin.setValue(selection.col_end)
-        self._last_validation_result = None
-        self._last_import_result = None
-        self._sync_excel_workspaces()
-        self._update_profile_summary()
-
-    def _apply_selection_to_header(self) -> None:
-        selection = self._current_excel_selection()
-        if not selection:
-            return
-        target_header = max(1, selection.data_start_row)
-        self.header_row_spin.setValue(target_header)
-        self.row_start_spin.setValue(target_header + 1)
-        self._applied_excel_selection = None
+        current_col_start = self.col_start_spin.value()
+        min_col = min(r.leftColumn() for r in ranges)
+        max_col = max(r.rightColumn() for r in ranges)
+        min_row = min(r.topRow() for r in ranges)
+        max_row = max(r.bottomRow() for r in ranges)
+        new_start = current_col_start + min_col
+        new_end = current_col_start + max_col
+        self.col_start_spin.setValue(new_start)
+        self.col_end_spin.setValue(new_end)
+        self.data_start_row_spin.setValue(self._excel_row_from_table_row(min_row))
+        self.data_end_row_spin.setValue(self._excel_row_from_table_row(max_row))
+        self._manual_excel_selection_confirmed = True
         self._refresh_sheet_preview()
 
-    def _clear_excel_selection(self) -> None:
-        self._excel_grid_selection_model.clearSelection()
-        self._update_selection_info()
+    def _apply_selection_to_header(self) -> None:
+        ranges = self.sheet_preview_table.selectedRanges()
+        if not ranges:
+            return
+        min_row = min(r.topRow() for r in ranges)
+        header_item = self.sheet_preview_table.verticalHeaderItem(min_row)
+        if header_item is not None:
+            try:
+                excel_row = int(header_item.text())
+            except ValueError:
+                excel_row = self._excel_row_from_table_row(min_row)
+        else:
+            excel_row = self._excel_row_from_table_row(min_row)
+        target_header = max(1, excel_row)
+        self.header_row_spin.setValue(target_header)
+        self.data_start_row_spin.setValue(target_header + 1)
+        self._manual_excel_selection_confirmed = True
+        self._refresh_sheet_preview()
 
     def _update_selection_info(self) -> None:
-        selection = self._current_excel_selection()
-        if not selection:
+        ranges = self.sheet_preview_table.selectedRanges()
+        if not ranges:
             self.selection_info_label.setText(self._selection_hint_text())
             self.selection_info_label.setToolTip("")
-            self._sync_excel_workspaces()
             return
-        col_labels = [
-            f"{column_name} (col {selection.col_start + index})"
-            for index, column_name in enumerate(selection.selected_columns)
-        ]
+        min_row = min(r.topRow() for r in ranges)
+        max_row = max(r.bottomRow() for r in ranges)
+        min_row_excel = self._excel_row_from_table_row(min_row)
+        max_row_excel = self._excel_row_from_table_row(max_row)
+
+        cols = sorted({col for r in ranges for col in range(r.leftColumn(), r.rightColumn() + 1)})
+        col_start_excel = self.col_start_spin.value()
+        col_labels = []
+        for col in cols:
+            header_item = self.sheet_preview_table.horizontalHeaderItem(col)
+            label = header_item.text() if header_item else str(col_start_excel + col)
+            col_number = col_start_excel + col
+            col_labels.append(f"{label} (col {col_number})")
         col_brief = self._compact_columns_text(col_labels, limit=6)
         text = (
-            f"Linhas Excel: {selection.data_start_row} - {selection.data_end_row} | "
+            f"Linhas Excel: {min_row_excel} - {max_row_excel} | "
             f"Colunas ({len(col_labels)}): {col_brief}"
         )
         self.selection_info_label.setText(text)
         self.selection_info_label.setToolTip(", ".join(col_labels))
-        self._sync_excel_workspaces()
 
     def _current_header_excel_row(self) -> int:
         """Return header row in Excel (1-based), clamped to at least 1."""
-        if not hasattr(self, "header_row_spin"):
-            return 1
         header_excel_row = self.header_row_spin.value()
         if header_excel_row < 1:
             header_excel_row = 1
             self.header_row_spin.setValue(header_excel_row)
         return header_excel_row
 
-    def _current_data_start_excel_row(self, header_excel_row: Optional[int] = None) -> int:
-        if not hasattr(self, "row_start_spin"):
-            return (header_excel_row or 1) + 1
-        header_value = header_excel_row or self._current_header_excel_row()
-        explicit_start = self.row_start_spin.value()
-        if explicit_start <= 0:
-            return header_value + 1
-        if explicit_start <= header_value:
-            explicit_start = header_value + 1
-            self.row_start_spin.setValue(explicit_start)
-        return explicit_start
+    def _current_data_start_excel_row(self, header_excel_row: int | None = None) -> int:
+        header_row = header_excel_row if header_excel_row is not None else self._current_header_excel_row()
+        value = self.data_start_row_spin.value()
+        if value <= header_row:
+            value = header_row + 1
+            self.data_start_row_spin.setValue(value)
+        return value
+
+    def _current_data_end_excel_row(self, data_start_row: int | None = None) -> int | None:
+        value = self.data_end_row_spin.value()
+        if value <= 0:
+            return None
+        start_row = data_start_row if data_start_row is not None else self._current_data_start_excel_row()
+        if value < start_row:
+            self.data_end_row_spin.setValue(0)
+            return None
+        return value
 
     def _selection_hint_text(self) -> str:
-        return "Selecione celulas na grade com mouse ou Shift + setas. Confirme o recorte na janela do Excel."
+        return (
+            "Use 'Selecionar dados em tela cheia' para escolher cabecalho, linhas e colunas. A pre-visualizacao abaixo mostra uma amostra do intervalo confirmado."
+        )
 
     def _excel_row_from_table_row(self, row_idx: int) -> int:
-        return self._excel_grid_first_data_row + row_idx
+        first_data_row = getattr(self, "_current_first_data_row", 2)
+        return first_data_row + row_idx
 
     def _normalize_lookup_key(self, value: object) -> str:
         if value is None:
@@ -2238,70 +980,6 @@ class MainWindow(QMainWindow):
                 continue
             df[col] = df[col].map(self._trim_cell_whitespace)
         return df
-
-    def _refresh_table_column_options(self) -> None:
-        if not getattr(self, "table_columns_list", None):
-            return
-        self.table_columns_list.clear()
-        blocked: set[str] = set()
-        if self.pk_auto_checkbox.isChecked() and self.primary_key_column:
-            blocked.add(self.primary_key_column)
-        for col in self.table_columns:
-            if col.name not in blocked:
-                self.table_columns_list.addItem(col.name)
-
-    def _remove_table_column_references(self, column_name: str) -> None:
-        for row in range(self.mapping_table.rowCount() - 1, -1, -1):
-            table_item = self.mapping_table.item(row, 1)
-            if table_item and table_item.text() == column_name:
-                self.mapping_table.removeRow(row)
-        for row in range(self.defaults_table.rowCount() - 1, -1, -1):
-            col_item = self.defaults_table.item(row, 0)
-            if col_item and col_item.text() == column_name:
-                self.defaults_table.removeRow(row)
-        for row in range(self.fk_table.rowCount() - 1, -1, -1):
-            target_item = self.fk_table.item(row, 0)
-            if target_item and target_item.text() == column_name:
-                self.fk_table.removeRow(row)
-
-    def _refresh_primary_key_hint(self) -> None:
-        if not getattr(self, "pk_summary_label", None):
-            return
-        if not self.table_columns:
-            self.pk_summary_label.setText("Selecione uma tabela para identificar a chave primaria.")
-            self.pk_hint_label.setText(
-                "Quando esta opcao estiver marcada, a coluna de chave nao sera enviada para o banco."
-            )
-            return
-        if not self.primary_key_column:
-            self.pk_summary_label.setText("Nenhuma chave primaria foi detectada na tabela selecionada.")
-            self.pk_hint_label.setText("O mapeamento deve preencher os campos obrigatorios informados pelo banco.")
-            return
-
-        pk_info = self._find_column_info(self.primary_key_column)
-        pk_type = f" ({pk_info.type})" if pk_info else ""
-        self.pk_summary_label.setText(f"Chave detectada: {self.primary_key_column}{pk_type}")
-
-        mapped = self.primary_key_column in self._current_mapped_columns()
-        defaulted = self.primary_key_column in self._current_default_columns()
-        fk_filled = self.primary_key_column in self._current_fk_columns()
-        if self.pk_auto_checkbox.isChecked():
-            self.pk_hint_label.setText(
-                f"A coluna {self.primary_key_column} nao sera enviada no INSERT; o banco deve gerar o valor."
-            )
-        elif mapped or defaulted or fk_filled:
-            origin = "mapeamento"
-            if defaulted:
-                origin = "valor padrao"
-            elif fk_filled:
-                origin = "relacionamento FK"
-            self.pk_hint_label.setText(
-                f"A coluna {self.primary_key_column} sera preenchida por {origin}."
-            )
-        else:
-            self.pk_hint_label.setText(
-                f"Mapeie {self.primary_key_column}, defina um valor padrao ou marque que o banco gera automaticamente."
-            )
 
     def _current_fk_columns(self) -> set[str]:
         cols: set[str] = set()
@@ -2690,7 +1368,6 @@ class MainWindow(QMainWindow):
         if not self.table_columns:
             self.required_columns_label.setText("Campos obrigatorios: --")
             self.required_columns_label.setToolTip("")
-            self._refresh_primary_key_hint()
             return
         required = [
             col.name
@@ -2704,7 +1381,6 @@ class MainWindow(QMainWindow):
         if not required:
             self.required_columns_label.setText("Campos obrigatorios: nenhum")
             self.required_columns_label.setToolTip("")
-            self._refresh_primary_key_hint()
             return
         required_brief = self._compact_columns_text(required)
         tooltip_lines = [f"Obrigatorios ({len(required)}): {', '.join(required)}"]
@@ -2719,7 +1395,6 @@ class MainWindow(QMainWindow):
             text = f"Obrigatorios ({len(required)}): {required_brief} | Todos atendidos"
         self.required_columns_label.setText(text)
         self.required_columns_label.setToolTip("\n".join(tooltip_lines))
-        self._refresh_primary_key_hint()
 
     def _clear_pre_validation_state(self) -> None:
         self._pre_validation_remove_duplicates = False
@@ -2807,7 +1482,7 @@ class MainWindow(QMainWindow):
         self.mapping_table.setRowCount(0)
         self.defaults_table.setRowCount(0)
         self.fk_table.setRowCount(0)
-        self._last_preview_text = ""
+        self.preview_text.clear()
         self.default_value_line.clear()
         self.default_bool_combo.setCurrentIndex(0)
         self.default_date_edit.setDate(QDate.currentDate())
@@ -2854,23 +1529,19 @@ class MainWindow(QMainWindow):
             if not col.nullable:
                 label += " [Obrigatorio]"
             self.columns_list.addItem(label)
+            self.table_columns_list.addItem(col.name)
             self.join_combo.addItem(col.name)
         self._set_combo_tooltip(self.join_combo)
         if self.primary_key_column:
-            self.pk_auto_checkbox.blockSignals(True)
             self.pk_auto_checkbox.setEnabled(True)
             self.pk_auto_checkbox.setChecked(False)
-            self.pk_auto_checkbox.blockSignals(False)
             self.pk_auto_checkbox.setText(
-                f"Banco gera automaticamente {self.primary_key_column} no INSERT"
+                f"PK {self.primary_key_column} gerada pelo banco (auto-incremento)"
             )
         else:
-            self.pk_auto_checkbox.blockSignals(True)
             self.pk_auto_checkbox.setEnabled(False)
             self.pk_auto_checkbox.setChecked(False)
-            self.pk_auto_checkbox.blockSignals(False)
-            self.pk_auto_checkbox.setText("Banco gera automaticamente esta chave no INSERT")
-        self._refresh_table_column_options()
+            self.pk_auto_checkbox.setText("PK gerada pelo banco (auto-incremento)")
         self._refresh_default_column_options()
         self._refresh_fk_target_options()
         self._refresh_required_columns_hint()
@@ -2909,8 +1580,10 @@ class MainWindow(QMainWindow):
 
     def _on_pk_auto_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if checked and self.primary_key_column:
-            self._remove_table_column_references(self.primary_key_column)
-        self._refresh_table_column_options()
+            for row in range(self.defaults_table.rowCount() - 1, -1, -1):
+                col_item = self.defaults_table.item(row, 0)
+                if col_item and col_item.text() == self.primary_key_column:
+                    self.defaults_table.removeRow(row)
         self._refresh_default_column_options()
         self._refresh_required_columns_hint()
 
@@ -2951,16 +1624,6 @@ class MainWindow(QMainWindow):
         if not self.update_radio.isChecked():
             missing_required = self._missing_required_columns(mapping, defaults, autogenerate_pk, fk_lookups)
             if missing_required:
-                if self.primary_key_column and self.primary_key_column in missing_required:
-                    QMessageBox.warning(
-                        self,
-                        "Chave primaria",
-                        (
-                            f"A chave primaria/codigo '{self.primary_key_column}' e obrigatoria. "
-                            "Mapeie essa coluna, defina um valor padrao ou marque que o banco gera automaticamente."
-                        ),
-                    )
-                    return None
                 QMessageBox.warning(
                     self,
                     "Mapeamento",
@@ -2968,14 +1631,16 @@ class MainWindow(QMainWindow):
                 )
                 return None
         header_excel_row = self._current_header_excel_row()
+        data_start_row = self._current_data_start_excel_row(header_excel_row)
+        data_end_row = self._current_data_end_excel_row(data_start_row)
         remove_duplicates = self._pre_validation_remove_duplicates and bool(self._pre_validation_column)
         duplicate_column = self._pre_validation_column if remove_duplicates else None
         return MappingSelection(
             sheet_name=sheet_items[0].text(),
             table_name=table_items[0].text(),
             header_row=header_excel_row,
-            start_row=self.row_start_spin.value() or None,
-            end_row=self.row_end_spin.value() or None,
+            data_start_row=data_start_row,
+            data_end_row=data_end_row,
             start_column=self.col_start_spin.value(),
             end_column=self.col_end_spin.value() or None,
             column_mapping=mapping,
@@ -3009,8 +1674,8 @@ class MainWindow(QMainWindow):
         df = self.excel_reader._read_dataframe(
             selection.sheet_name,
             selection.header_row,
-            data_start_row=selection.start_row,
-            data_end_row=selection.end_row,
+            data_start_row=selection.data_start_row,
+            data_end_row=selection.data_end_row,
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
@@ -3033,8 +1698,8 @@ class MainWindow(QMainWindow):
         df = self.excel_reader._read_dataframe(
             selection.sheet_name,
             selection.header_row,
-            data_start_row=selection.start_row,
-            data_end_row=selection.end_row,
+            data_start_row=selection.data_start_row,
+            data_end_row=selection.data_end_row,
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
@@ -3186,8 +1851,8 @@ class MainWindow(QMainWindow):
             preview = self.excel_reader.load_sheet_preview(
                 selection.sheet_name,
                 header_row=selection.header_row,
-                data_start_row=selection.start_row,
-                data_end_row=selection.end_row,
+                data_start_row=selection.data_start_row,
+                data_end_row=selection.data_end_row,
                 col_start=selection.start_column,
                 col_end=selection.end_column,
             )
@@ -3201,11 +1866,6 @@ class MainWindow(QMainWindow):
                 text.append("Valores padrão aplicados:")
                 for col, value in selection.default_values.items():
                     text.append(f"- {col}: {value}")
-            if selection.autogenerate_pk and selection.primary_key:
-                text.append("")
-                text.append(
-                    f"Chave primaria/codigo: {selection.primary_key} nao sera enviada no INSERT; o banco deve gerar o valor."
-                )
             if selection.similarity_replacements:
                 text.append("")
                 text.append("Padronização de texto:")
@@ -3247,39 +1907,9 @@ class MainWindow(QMainWindow):
                     duplicate_summary += f" (previsto remover {removed} de {total} linhas)"
                 text.append(duplicate_summary)
             text.extend(["", "SQL estimado:", sql_example])
-            self._show_preview_dialog("\n".join(text))
+            self.preview_text.setPlainText("\n".join(text))
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao pré-visualizar", exc)
-
-    def _show_preview_dialog(self, text: str) -> None:
-        self._last_preview_text = text
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Pre-visualizacao")
-        dialog.resize(900, 650)
-
-        layout = QVBoxLayout(dialog)
-        preview_edit = QTextEdit()
-        preview_edit.setReadOnly(True)
-        preview_edit.setLineWrapMode(QTextEdit.NoWrap)
-        preview_edit.setPlainText(text)
-        layout.addWidget(preview_edit, 1)
-
-        buttons = QHBoxLayout()
-        export_csv_btn = QPushButton("Exportar CSV mapeado")
-        export_csv_btn.clicked.connect(lambda: self._export_mapped_data("csv"))
-        buttons.addWidget(export_csv_btn)
-
-        export_excel_btn = QPushButton("Exportar Excel mapeado")
-        export_excel_btn.clicked.connect(lambda: self._export_mapped_data("excel"))
-        buttons.addWidget(export_excel_btn)
-
-        buttons.addStretch()
-        close_btn = QPushButton("Fechar")
-        close_btn.clicked.connect(dialog.accept)
-        buttons.addWidget(close_btn)
-        layout.addLayout(buttons)
-
-        dialog.exec()
 
     def _build_sql_example(self, selection: MappingSelection) -> str:
         cols: List[str] = []
@@ -3310,7 +1940,7 @@ class MainWindow(QMainWindow):
         limits = {col.name: col.max_length for col in self.table_columns if col.max_length}
         if not limits:
             return
-        first_excel_row = selection.start_row or (selection.header_row + 1)
+        first_excel_row = selection.header_row + 1
         too_long: List[tuple[int, str, int, str]] = []
         for idx, record in enumerate(records):
             for col_name, max_len in limits.items():
@@ -3532,8 +2162,8 @@ class MainWindow(QMainWindow):
         df = self.excel_reader._read_dataframe(
             selection.sheet_name,
             selection.header_row,
-            data_start_row=selection.start_row,
-            data_end_row=selection.end_row,
+            data_start_row=selection.data_start_row,
+            data_end_row=selection.data_end_row,
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
@@ -3563,11 +2193,9 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Colunas da planilha não encontradas: {', '.join(missing_excel)}")
 
         records: List[Dict[str, object]] = []
-        record_source_rows: List[tuple[int, pd.Series]] = []
         source_columns_for_null_check = [s for s, _ in column_mapping]
         skipped_null_rows = 0
-        first_excel_row = selection.start_row or (selection.header_row + 1)
-        for idx, (_, row) in enumerate(df.iterrows()):
+        for _, row in df.iterrows():
             if source_columns_for_null_check:
                 if all(self._is_nullish(row.get(col)) for col in source_columns_for_null_check):
                     skipped_null_rows += 1
@@ -3579,7 +2207,6 @@ class MainWindow(QMainWindow):
                 if sheet_col in row:
                     record[table_col] = self.excel_reader._normalize_cell(row[sheet_col])
             records.append(record)
-            record_source_rows.append((first_excel_row + idx, row))
         self._last_skipped_null_rows = skipped_null_rows
 
         # Aplica valores padrão
@@ -3614,7 +2241,9 @@ class MainWindow(QMainWindow):
                         )
                     lookup_cache[key] = cache
             unresolved: List[str] = []
-            for record_idx, (excel_row, row) in enumerate(record_source_rows):
+            first_excel_row = selection.data_start_row
+            for idx, (_, row) in enumerate(df.iterrows()):
+                excel_row = first_excel_row + idx
                 for fk in selection.fk_lookups:
                     raw_value = row.get(fk.excel_column)
                     raw_value = self._apply_fk_conversion(fk.excel_column, raw_value)
@@ -3633,7 +2262,7 @@ class MainWindow(QMainWindow):
                             f"{fk.foreign_table}.{fk.foreign_label_column} para preencher {fk.target_column}"
                         )
                     else:
-                        records[record_idx][fk.target_column] = mapped
+                        records[idx][fk.target_column] = mapped
             if unresolved:
                 details = "\n".join(unresolved[:5])
                 remaining = len(unresolved) - len(unresolved[:5])

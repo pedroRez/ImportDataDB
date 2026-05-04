@@ -34,6 +34,24 @@ class ExcelReader:
     def sheet_names(self) -> List[str]:
         return pd.ExcelFile(self.path).sheet_names
 
+    def load_sheet_raw(self, sheet_name: str) -> pd.DataFrame:
+        """Load the visible used range without assuming which row is the header."""
+        df = pd.read_excel(self.path, sheet_name=sheet_name, dtype=object, header=None)
+        if df.empty:
+            return df
+
+        non_empty_rows = df.notna().any(axis=1)
+        if non_empty_rows.any():
+            last_row = int(non_empty_rows[non_empty_rows].index[-1])
+            df = df.iloc[: last_row + 1]
+
+        non_empty_cols = df.notna().any(axis=0)
+        if non_empty_cols.any():
+            last_col = int(non_empty_cols[non_empty_cols].index[-1])
+            df = df.iloc[:, : last_col + 1]
+
+        return df
+
     def _normalize_columns(self, columns: Sequence[object]) -> List[str]:
         normalized: List[str] = []
         seen: Dict[str, int] = {}
@@ -48,18 +66,6 @@ class ExcelReader:
                 seen[name] = 1
             normalized.append(name)
         return normalized
-
-    def _drop_empty_edge_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty or df.shape[1] == 0:
-            return df
-
-        non_empty = [not df.iloc[:, idx].isna().all() for idx in range(df.shape[1])]
-        if not any(non_empty):
-            return df.iloc[:, 0:0]
-
-        first_idx = non_empty.index(True)
-        last_idx = len(non_empty) - 1 - list(reversed(non_empty)).index(True)
-        return df.iloc[:, first_idx : last_idx + 1]
 
     def _read_dataframe(
         self,
@@ -91,7 +97,6 @@ class ExcelReader:
             end_idx = col_end if col_end else None
             df = df.iloc[:, start_idx:end_idx]
 
-        df = self._drop_empty_edge_columns(df)
         df.columns = self._normalize_columns(df.columns)
 
         first_data_row = header_row + 1
@@ -130,24 +135,6 @@ class ExcelReader:
         columns = list(df.columns)
         preview = SheetPreview(name=sheet_name, columns=columns, sample=df.head(30), header_row=header_row)
         return preview
-
-    def load_sheet_dataframe(
-        self,
-        sheet_name: str,
-        header_row: int,
-        data_start_row: Optional[int] = None,
-        data_end_row: Optional[int] = None,
-        col_start: Optional[int] = None,
-        col_end: Optional[int] = None,
-    ) -> pd.DataFrame:
-        return self._read_dataframe(
-            sheet_name,
-            header_row=header_row,
-            data_start_row=data_start_row,
-            data_end_row=data_end_row,
-            col_start=col_start,
-            col_end=col_end,
-        )
 
     def read_records(
         self,

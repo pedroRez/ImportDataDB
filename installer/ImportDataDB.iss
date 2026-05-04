@@ -1,23 +1,18 @@
-#ifndef MyAppName
 #define MyAppName "ImportDataDB"
-#endif
-#ifndef MyAppVersion
-#define MyAppVersion "0.2.1"
-#endif
+#define MyAppVersion "0.1.0"
 #define MyAppPublisher "ImportDataDB"
 #define MyAppExeName "ImportDataDB.exe"
 
 [Setup]
 AppId={{D68D0CFD-C7C5-48E4-AAF5-5C89D368CCF4}
 AppName={#MyAppName}
-AppVerName={#MyAppName} {#MyAppVersion}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\output
-OutputBaseFilename=ImportDataDB-Setup-{#MyAppVersion}
+OutputBaseFilename=ImportDataDB-Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

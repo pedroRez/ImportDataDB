@@ -21,8 +21,8 @@ class MappingSelection:
     sheet_name: str
     table_name: str
     header_row: int
-    start_row: Optional[int]
-    end_row: Optional[int]
+    data_start_row: Optional[int]
+    data_end_row: Optional[int]
     start_column: Optional[int]
     end_column: Optional[int]
     column_mapping: List[tuple[str, str]]
