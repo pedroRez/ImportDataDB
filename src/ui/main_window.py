@@ -103,7 +103,7 @@ class MainWindow(QMainWindow):
         self._available_profiles: List[ImportProfile] = []
         self._last_validation_result: XerifeValidationResult | None = None
         self._last_import_result: Dict[str, Any] | None = None
-        self._quick_mode = "quick"
+        self._quick_mode = "advanced"
         self._excel_grid_model = ExcelGridModel()
         self._excel_grid_selection_model = QItemSelectionModel(self._excel_grid_model)
         self._excel_dataframe: pd.DataFrame | None = None
@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
             lambda _selected, _deselected: self._update_selection_info()
         )
         self.setStyleSheet(build_app_stylesheet())
-        self._set_mode("quick")
+        self._set_mode("advanced")
         self._sync_quick_workflow_state()
 
     def _build_menu(self) -> None:
@@ -156,7 +156,7 @@ class MainWindow(QMainWindow):
         self.quick_page = self._build_quick_import_page()
         self.advanced_page = self._build_advanced_page()
         self.quick_page_container = self._wrap_mode_page(self.quick_page)
-        self.advanced_page_container = self._wrap_mode_page(self.advanced_page)
+        self.advanced_page_container = self._wrap_mode_page(self.advanced_page, allow_horizontal=True)
         self.content_stack.addWidget(self.quick_page_container)
         self.content_stack.addWidget(self.advanced_page_container)
         central_layout.addWidget(self.content_stack, 1)
@@ -164,11 +164,12 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self._update_step_progress()
 
-    def _wrap_mode_page(self, page: QWidget) -> QScrollArea:
+    def _wrap_mode_page(self, page: QWidget, *, allow_horizontal: bool = False) -> QScrollArea:
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if allow_horizontal else Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_area.setWidget(page)
         return scroll_area
 
@@ -189,16 +190,16 @@ class MainWindow(QMainWindow):
         eyebrow.setProperty("role", "eyebrow")
         title_layout.addWidget(eyebrow)
 
-        title = QLabel("Importacao rapida para o Xerife")
-        title.setProperty("role", "section-title")
-        title_layout.addWidget(title)
+        self.shell_title_label = QLabel("Importacao generica de Excel para banco")
+        self.shell_title_label.setProperty("role", "section-title")
+        title_layout.addWidget(self.shell_title_label)
 
-        subtitle = QLabel(
-            "Selecione um modelo, confirme o Excel em uma janela dedicada e envie o lote."
+        self.shell_subtitle_label = QLabel(
+            "Mapeie colunas de/para, resolva FK por descricao, valide os dados e execute INSERT ou UPDATE."
         )
-        subtitle.setWordWrap(True)
-        subtitle.setProperty("role", "muted")
-        title_layout.addWidget(subtitle)
+        self.shell_subtitle_label.setWordWrap(True)
+        self.shell_subtitle_label.setProperty("role", "muted")
+        title_layout.addWidget(self.shell_subtitle_label)
 
         layout.addWidget(title_block, 1)
 
@@ -230,28 +231,28 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(10)
 
-        text = QLabel("Escolha como quer trabalhar:")
+        text = QLabel("Fluxo de trabalho:")
         text.setProperty("role", "card-title")
         layout.addWidget(text)
 
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.quick_mode_btn = QToolButton()
-        self.quick_mode_btn.setText("Importacao rapida")
-        self.quick_mode_btn.setCheckable(True)
-        self.quick_mode_btn.setProperty("modeButton", True)
-        self.quick_mode_btn.clicked.connect(lambda: self._set_mode("quick"))
-        self.mode_button_group.addButton(self.quick_mode_btn)
-        layout.addWidget(self.quick_mode_btn)
-
         self.advanced_mode_btn = QToolButton()
-        self.advanced_mode_btn.setText("Modo avancado")
+        self.advanced_mode_btn.setText("Importacao generica")
         self.advanced_mode_btn.setCheckable(True)
         self.advanced_mode_btn.setProperty("modeButton", True)
         self.advanced_mode_btn.clicked.connect(lambda: self._set_mode("advanced"))
         self.mode_button_group.addButton(self.advanced_mode_btn)
         layout.addWidget(self.advanced_mode_btn)
+
+        self.quick_mode_btn = QToolButton()
+        self.quick_mode_btn.setText("Perfil Xerife")
+        self.quick_mode_btn.setCheckable(True)
+        self.quick_mode_btn.setProperty("modeButton", True)
+        self.quick_mode_btn.clicked.connect(lambda: self._set_mode("quick"))
+        self.mode_button_group.addButton(self.quick_mode_btn)
+        layout.addWidget(self.quick_mode_btn)
         layout.addStretch()
         return container
 
@@ -288,15 +289,18 @@ class MainWindow(QMainWindow):
         intro_layout.setContentsMargins(18, 16, 18, 16)
         intro_layout.setSpacing(6)
 
-        intro_eyebrow = QLabel("Modo avancado")
+        intro_eyebrow = QLabel("Fluxo principal")
         intro_eyebrow.setProperty("role", "eyebrow")
         intro_layout.addWidget(intro_eyebrow)
 
-        intro_title = QLabel("Mapeamento tecnico e importacao generica")
+        intro_title = QLabel("Mapeamento de/para, FK e validacoes")
         intro_title.setProperty("role", "section-title")
         intro_layout.addWidget(intro_title)
 
-        intro_text = QLabel("Use esta area para editar modelos, mapear campos e revisar o fluxo tecnico.")
+        intro_text = QLabel(
+            "Use este fluxo para importar qualquer planilha para qualquer tabela conectada, "
+            "com valores padrao, relacionamentos FK por descricao e INSERT ou UPDATE."
+        )
         intro_text.setWordWrap(True)
         intro_text.setProperty("role", "muted")
         intro_layout.addWidget(intro_text)
@@ -445,6 +449,17 @@ class MainWindow(QMainWindow):
         is_quick = mode == "quick"
         self.quick_mode_btn.setChecked(is_quick)
         self.advanced_mode_btn.setChecked(not is_quick)
+        if hasattr(self, "shell_title_label"):
+            if is_quick:
+                self.shell_title_label.setText("Importacao por perfil Xerife")
+                self.shell_subtitle_label.setText(
+                    "Selecione um modelo salvo, confirme o Excel em uma janela dedicada e envie o lote."
+                )
+            else:
+                self.shell_title_label.setText("Importacao generica de Excel para banco")
+                self.shell_subtitle_label.setText(
+                    "Mapeie colunas de/para, resolva FK por descricao, valide os dados e execute INSERT ou UPDATE."
+                )
         self._refresh_widget_style(self.quick_mode_btn)
         self._refresh_widget_style(self.advanced_mode_btn)
         self.content_stack.setCurrentWidget(
@@ -675,6 +690,8 @@ class MainWindow(QMainWindow):
         current_sheet = selected_items[0].text() if selected_items else None
         selection_text = self.selection_info_label.text() if hasattr(self, "selection_info_label") else self._selection_hint_text()
         applied_text = self._applied_selection_summary()
+        if hasattr(self, "advanced_file_label"):
+            self.advanced_file_label.setText(f"Arquivo atual: {self.excel_file_path or 'nenhum'}")
         if hasattr(self, "advanced_sheet_label"):
             self.advanced_sheet_label.setText(f"Aba atual: {current_sheet or 'nenhuma'}")
         if hasattr(self, "advanced_selection_label"):
@@ -1065,6 +1082,10 @@ class MainWindow(QMainWindow):
         selection_text.setWordWrap(True)
         selection_layout.addWidget(selection_text)
 
+        self.advanced_file_label = QLabel("Arquivo atual: nenhum")
+        self.advanced_file_label.setWordWrap(True)
+        selection_layout.addWidget(self.advanced_file_label)
+
         self.advanced_sheet_label = QLabel("Aba atual: nenhuma")
         self.advanced_sheet_label.setWordWrap(True)
         selection_layout.addWidget(self.advanced_sheet_label)
@@ -1074,6 +1095,10 @@ class MainWindow(QMainWindow):
         selection_layout.addWidget(self.advanced_selection_label)
 
         selection_actions = QHBoxLayout()
+        self.choose_advanced_file_btn = QPushButton("Escolher planilha")
+        self.choose_advanced_file_btn.clicked.connect(self._choose_excel)
+        selection_actions.addWidget(self.choose_advanced_file_btn)
+
         self.open_advanced_selection_btn = QPushButton("Abrir seletor do Excel")
         self.open_advanced_selection_btn.setProperty("variant", "primary")
         self.open_advanced_selection_btn.clicked.connect(self._open_excel_selection_dialog)
@@ -1161,6 +1186,9 @@ class MainWindow(QMainWindow):
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -2921,8 +2949,8 @@ class MainWindow(QMainWindow):
         df = self.excel_reader._read_dataframe(
             selection.sheet_name,
             selection.header_row,
-            data_start_row=None,
-            data_end_row=None,
+            data_start_row=selection.start_row,
+            data_end_row=selection.end_row,
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
@@ -3163,7 +3191,7 @@ class MainWindow(QMainWindow):
         limits = {col.name: col.max_length for col in self.table_columns if col.max_length}
         if not limits:
             return
-        first_excel_row = selection.header_row + 1
+        first_excel_row = selection.start_row or (selection.header_row + 1)
         too_long: List[tuple[int, str, int, str]] = []
         for idx, record in enumerate(records):
             for col_name, max_len in limits.items():
@@ -3385,8 +3413,8 @@ class MainWindow(QMainWindow):
         df = self.excel_reader._read_dataframe(
             selection.sheet_name,
             selection.header_row,
-            data_start_row=None,
-            data_end_row=None,
+            data_start_row=selection.start_row,
+            data_end_row=selection.end_row,
             col_start=selection.start_column,
             col_end=selection.end_column,
         )
@@ -3416,9 +3444,11 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Colunas da planilha não encontradas: {', '.join(missing_excel)}")
 
         records: List[Dict[str, object]] = []
+        record_source_rows: List[tuple[int, pd.Series]] = []
         source_columns_for_null_check = [s for s, _ in column_mapping]
         skipped_null_rows = 0
-        for _, row in df.iterrows():
+        first_excel_row = selection.start_row or (selection.header_row + 1)
+        for idx, (_, row) in enumerate(df.iterrows()):
             if source_columns_for_null_check:
                 if all(self._is_nullish(row.get(col)) for col in source_columns_for_null_check):
                     skipped_null_rows += 1
@@ -3430,6 +3460,7 @@ class MainWindow(QMainWindow):
                 if sheet_col in row:
                     record[table_col] = self.excel_reader._normalize_cell(row[sheet_col])
             records.append(record)
+            record_source_rows.append((first_excel_row + idx, row))
         self._last_skipped_null_rows = skipped_null_rows
 
         # Aplica valores padrão
@@ -3464,9 +3495,7 @@ class MainWindow(QMainWindow):
                         )
                     lookup_cache[key] = cache
             unresolved: List[str] = []
-            first_excel_row = selection.start_row or (selection.header_row + 1)
-            for idx, (_, row) in enumerate(df.iterrows()):
-                excel_row = first_excel_row + idx
+            for record_idx, (excel_row, row) in enumerate(record_source_rows):
                 for fk in selection.fk_lookups:
                     raw_value = row.get(fk.excel_column)
                     raw_value = self._apply_fk_conversion(fk.excel_column, raw_value)
@@ -3485,7 +3514,7 @@ class MainWindow(QMainWindow):
                             f"{fk.foreign_table}.{fk.foreign_label_column} para preencher {fk.target_column}"
                         )
                     else:
-                        records[idx][fk.target_column] = mapped
+                        records[record_idx][fk.target_column] = mapped
             if unresolved:
                 details = "\n".join(unresolved[:5])
                 remaining = len(unresolved) - len(unresolved[:5])

@@ -4,12 +4,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -22,11 +24,22 @@ class ExcelSelectionDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Selecionar dados do Excel")
         self.setModal(True)
-        self.resize(1400, 900)
+        self._fit_to_available_screen()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
+
+        body_scroll = QScrollArea()
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.NoFrame)
+        body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(14)
 
         header = QFrame()
         header.setProperty("card", True)
@@ -48,7 +61,7 @@ class ExcelSelectionDialog(QDialog):
         subtitle.setWordWrap(True)
         subtitle.setProperty("role", "muted")
         header_layout.addWidget(subtitle)
-        layout.addWidget(header)
+        body_layout.addWidget(header)
 
         self.workspace = ExcelSelectionWorkspace(
             subtitle=(
@@ -61,7 +74,9 @@ class ExcelSelectionDialog(QDialog):
         self.workspace.use_header_button.hide()
         self.workspace.clear_selection_button.setText("Limpar bloco")
         self.workspace.reload_button.setText("Recarregar aba")
-        layout.addWidget(self.workspace, 1)
+        body_layout.addWidget(self.workspace, 1)
+        body_scroll.setWidget(body)
+        layout.addWidget(body_scroll, 1)
 
         footer = QFrame()
         footer.setProperty("card", True)
@@ -90,6 +105,18 @@ class ExcelSelectionDialog(QDialog):
         footer_layout.addLayout(action_row)
 
         layout.addWidget(footer)
+
+    def _fit_to_available_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            self.resize(1200, 760)
+            self.setMinimumSize(560, 420)
+            return
+        available = screen.availableGeometry()
+        width = max(560, min(1400, int(available.width() * 0.94)))
+        height = max(420, min(900, int(available.height() * 0.90)))
+        self.resize(width, height)
+        self.setMinimumSize(min(560, width), min(420, height))
 
     def show_maximized(self) -> None:
         self.showMaximized()
