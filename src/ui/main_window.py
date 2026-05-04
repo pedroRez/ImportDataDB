@@ -48,13 +48,14 @@ from src.core.mapping import ForeignKeyLookup, MappingSelection
 from src.db.provider import ColumnInfo, DatabaseProvider
 from src.excel.reader import ExcelReader, SheetPreview
 from src.ui.excel_selection_dialog import ExcelSelectionDialog
+from src.version import APP_NAME, __version__
 
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ImportDataDB")
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1200, 800)
 
         self.database = DatabaseProvider()
