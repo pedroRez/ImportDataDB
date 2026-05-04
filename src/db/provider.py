@@ -65,15 +65,28 @@ class DatabaseProvider:
             return 0
 
         records_to_use = records
+        generated_values: Dict[str, str] = {}
         if autogenerate_pk and primary_key:
             records_to_use = [{k: v for k, v in record.items() if k != primary_key} for record in records]
+            generated_pk_sql = self._generated_pk_sql(table, schema, primary_key)
+            if generated_pk_sql:
+                generated_values[primary_key] = generated_pk_sql
 
         with self.engine.begin() as conn:
-            placeholders = ", ".join(f":{col}" for col in records_to_use[0].keys())
-            columns = ", ".join(records_to_use[0].keys())
+            data_columns = list(records_to_use[0].keys())
+            columns = ", ".join([*generated_values.keys(), *data_columns])
+            placeholders = ", ".join([*generated_values.values(), *(f":{col}" for col in data_columns)])
+            if not columns:
+                raise ValueError("Nenhuma coluna disponivel para INSERT.")
             stmt = text(f"INSERT INTO {schema}.{table} ({columns}) VALUES ({placeholders})")
             conn.execute(stmt, records_to_use)
         return len(records_to_use)
+
+    def _generated_pk_sql(self, table: str, schema: str, primary_key: str) -> Optional[str]:
+        """Return SQL expression for known application-managed primary keys."""
+        if schema == "public" and table == "estoque" and primary_key == "codigo_fixo":
+            return "LPAD(nextval('public.codigo_fixo_estoque_seq'::regclass)::text, 5, '0')"
+        return None
 
     def execute_update(self, table: str, records: List[Dict[str, object]], join_column: str, schema: str = "public") -> int:
         if not self.engine or not records:

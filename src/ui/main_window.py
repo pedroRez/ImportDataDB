@@ -1535,9 +1535,12 @@ class MainWindow(QMainWindow):
         if self.primary_key_column:
             self.pk_auto_checkbox.setEnabled(True)
             self.pk_auto_checkbox.setChecked(False)
-            self.pk_auto_checkbox.setText(
-                f"PK {self.primary_key_column} gerada pelo banco (auto-incremento)"
-            )
+            if table == "estoque" and self.primary_key_column == "codigo_fixo":
+                self.pk_auto_checkbox.setText("PK codigo_fixo gerada pela sequencia do Xerife")
+            else:
+                self.pk_auto_checkbox.setText(
+                    f"PK {self.primary_key_column} gerada pelo banco (auto-incremento)"
+                )
         else:
             self.pk_auto_checkbox.setEnabled(False)
             self.pk_auto_checkbox.setChecked(False)
@@ -1930,8 +1933,18 @@ class MainWindow(QMainWindow):
             if c not in cols:
                 cols.append(c)
         if selection.operation == "INSERT":
-            placeholders = ", ".join(f":{c}" for c in cols)
-            return f"INSERT INTO {selection.table_name} ({', '.join(cols)}) VALUES ({placeholders});"
+            generated_cols: List[str] = []
+            generated_values: List[str] = []
+            if (
+                selection.autogenerate_pk
+                and selection.table_name == "estoque"
+                and selection.primary_key == "codigo_fixo"
+            ):
+                generated_cols.append("codigo_fixo")
+                generated_values.append("LPAD(nextval('public.codigo_fixo_estoque_seq'::regclass)::text, 5, '0')")
+            all_cols = [*generated_cols, *cols]
+            placeholders = ", ".join([*generated_values, *(f":{c}" for c in cols)])
+            return f"INSERT INTO {selection.table_name} ({', '.join(all_cols)}) VALUES ({placeholders});"
         else:
             set_clause = ", ".join(f"{c} = :{c}" for c in cols if c != selection.join_column)
             return f"UPDATE {selection.table_name} SET {set_clause} WHERE {selection.join_column} = :{selection.join_column};"
