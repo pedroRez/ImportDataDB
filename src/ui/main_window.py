@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QProgressDialog,
     QSpinBox,
-    QSplitter,
     QStackedWidget,
     QTabWidget,
     QTableWidget,
@@ -125,6 +124,7 @@ class MainWindow(QMainWindow):
         self.pwd_edit.setEchoMode(QLineEdit.Password)
         self.loaded_profile_id: str | None = None
         self._last_profile_preview: str = ""
+        self._last_preview_text: str = ""
 
         self._build_menu()
         self._build_layout()
@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
         for index, button in enumerate(page.stepper.buttons):
             button.clicked.connect(lambda _checked=False, step=index: page.set_step(step))
         page.use_profile_btn.clicked.connect(self._apply_selected_quick_profile)
-        page.new_profile_btn.clicked.connect(self._open_advanced_profile_editor)
+        page.new_profile_btn.hide()
         page.model_next_btn.clicked.connect(lambda: page.set_step(1))
         page.spreadsheet_back_btn.clicked.connect(lambda: page.set_step(0))
         page.spreadsheet_next_btn.clicked.connect(lambda: page.set_step(2))
@@ -319,16 +319,9 @@ class MainWindow(QMainWindow):
         progress_layout.addWidget(self.step_hint_label)
         layout.addWidget(progress_card)
 
-        self.advanced_profile_toggle = QToolButton()
-        self.advanced_profile_toggle.setText("Mostrar editor de modelo")
-        self.advanced_profile_toggle.setCheckable(True)
-        self.advanced_profile_toggle.setProperty("variant", "ghost")
-        self.advanced_profile_toggle.toggled.connect(self._toggle_advanced_profile_panel)
-        layout.addWidget(self.advanced_profile_toggle, alignment=Qt.AlignLeft)
-
-        self.advanced_profile_panel = self._build_profile_panel()
-        self.advanced_profile_panel.setVisible(False)
-        layout.addWidget(self.advanced_profile_panel)
+        self.profile_backend_panel = self._build_profile_panel()
+        self.profile_backend_panel.setParent(page)
+        self.profile_backend_panel.hide()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_excel_tab(), "1. Excel")
@@ -489,10 +482,8 @@ class MainWindow(QMainWindow):
         self.quick_page.set_step(1)
 
     def _open_advanced_profile_editor(self) -> None:
-        self._set_mode("advanced")
-        if hasattr(self, "advanced_profile_toggle"):
-            self.advanced_profile_toggle.setChecked(True)
-        self.profile_id_edit.setFocus()
+        self._set_mode("quick")
+        self.quick_page.set_step(0)
 
     def _toggle_validation_details(self) -> None:
         visible = not self.quick_page.validation_details.isVisible()
@@ -500,7 +491,11 @@ class MainWindow(QMainWindow):
         self.quick_page.validation_details_btn.setText("Ocultar detalhes" if visible else "Ver detalhes")
 
     def _load_excel_file_from_drop(self, file_name: str) -> None:
-        self._load_excel_file(Path(file_name), open_dialog=True)
+        self._load_excel_file(
+            Path(file_name),
+            open_dialog=True,
+            use_profile=self._quick_mode == "quick" and bool(self.loaded_profile_id),
+        )
 
     def _clone_excel_selection(self, selection: ExcelSelectionResult | None) -> ExcelSelectionResult | None:
         if selection is None:
@@ -737,7 +732,7 @@ class MainWindow(QMainWindow):
         self.quick_page.profile_list.blockSignals(False)
 
         selected_profile = None
-        selected_profile_id = self._selected_quick_profile_id() or self.profile_combo.currentData()
+        selected_profile_id = self._selected_quick_profile_id()
         if selected_profile_id:
             try:
                 selected_profile = load_profile(str(selected_profile_id))
@@ -1045,13 +1040,7 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._build_mapping_panel())
-        splitter.addWidget(self._build_preview_panel())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-
-        layout.addWidget(splitter)
+        layout.addWidget(self._build_mapping_panel())
         return tab
 
     # Excel panel
@@ -1181,26 +1170,13 @@ class MainWindow(QMainWindow):
     # Mapping panel
     def _build_mapping_panel(self) -> QWidget:
         panel = QGroupBox("Mapeamento")
-        layout = QVBoxLayout(panel)
-        layout.setSpacing(12)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
+        content_layout = QVBoxLayout(panel)
         content_layout.setSpacing(12)
 
         content_layout.addWidget(self._build_mapping_section())
         content_layout.addWidget(self._build_defaults_and_fk_section())
         content_layout.addWidget(self._build_operations_section())
         content_layout.addStretch()
-
-        scroll_area.setWidget(content)
-        layout.addWidget(scroll_area)
 
         return panel
 
@@ -1434,9 +1410,13 @@ class MainWindow(QMainWindow):
         )
         if not file_name:
             return
-        self._load_excel_file(Path(file_name), open_dialog=True)
+        self._load_excel_file(
+            Path(file_name),
+            open_dialog=True,
+            use_profile=self._quick_mode == "quick" and bool(self.loaded_profile_id),
+        )
 
-    def _load_excel_file(self, file_path: Path, *, open_dialog: bool = False) -> None:
+    def _load_excel_file(self, file_path: Path, *, open_dialog: bool = False, use_profile: bool = False) -> None:
         self.excel_file_path = file_path
         try:
             self.excel_reader = ExcelReader(str(file_path))
@@ -1461,9 +1441,12 @@ class MainWindow(QMainWindow):
                 workspace.set_file_path(file_path)
                 workspace.set_loading("Carregando planilha...", "Preparando abas e intervalo inicial.")
 
+            if not use_profile:
+                self.loaded_profile_id = None
+
             selected_profile: ImportProfile | None = None
             target_sheet = None
-            selected_profile_id = self._selected_profile_id()
+            selected_profile_id = self._selected_profile_id() if use_profile else None
             if selected_profile_id:
                 try:
                     selected_profile = load_profile(selected_profile_id)
@@ -1487,6 +1470,11 @@ class MainWindow(QMainWindow):
                     selected_columns=[],
                 )
             else:
+                self.header_row_spin.setValue(1)
+                self.row_start_spin.setValue(2)
+                self.row_end_spin.setValue(0)
+                self.col_start_spin.setValue(1)
+                self.col_end_spin.setValue(0)
                 self._applied_excel_selection = None
 
             self.sheet_list.blockSignals(True)
@@ -1529,7 +1517,7 @@ class MainWindow(QMainWindow):
         self._sync_quick_workflow_state()
 
     def _selected_profile_id(self) -> str | None:
-        profile_id = self.loaded_profile_id or self.profile_combo.currentData() or self._selected_quick_profile_id()
+        profile_id = self.loaded_profile_id
         if not profile_id:
             return None
         return str(profile_id)
@@ -1681,7 +1669,6 @@ class MainWindow(QMainWindow):
             self._last_validation_result = validation
             self._last_import_result = None
             self._last_profile_preview = validation.preview_text()
-            self.preview_text.setPlainText(validation.preview_text())
             self._update_profile_summary(profile)
             self._sync_quick_workflow_state()
             if validation.issues and show_blocking_dialog:
@@ -1744,7 +1731,6 @@ class MainWindow(QMainWindow):
             if result_items:
                 result_lines.extend(["", pd.DataFrame(result_items[:20]).to_string(index=False)])
             result_text = "\n".join(result_lines)
-            self.preview_text.setPlainText(result_text)
             self.quick_page.validation_details.setPlainText(result_text)
             self.quick_page.set_step(3)
             self._sync_quick_workflow_state()
@@ -2735,7 +2721,7 @@ class MainWindow(QMainWindow):
         self.mapping_table.setRowCount(0)
         self.defaults_table.setRowCount(0)
         self.fk_table.setRowCount(0)
-        self.preview_text.clear()
+        self._last_preview_text = ""
         self.default_value_line.clear()
         self.default_bool_combo.setCurrentIndex(0)
         self.default_date_edit.setDate(QDate.currentDate())
@@ -3158,9 +3144,39 @@ class MainWindow(QMainWindow):
                     duplicate_summary += f" (previsto remover {removed} de {total} linhas)"
                 text.append(duplicate_summary)
             text.extend(["", "SQL estimado:", sql_example])
-            self.preview_text.setPlainText("\n".join(text))
+            self._show_preview_dialog("\n".join(text))
         except Exception as exc:  # noqa: BLE001
             self._show_error("Erro ao pré-visualizar", exc)
+
+    def _show_preview_dialog(self, text: str) -> None:
+        self._last_preview_text = text
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pre-visualizacao")
+        dialog.resize(900, 650)
+
+        layout = QVBoxLayout(dialog)
+        preview_edit = QTextEdit()
+        preview_edit.setReadOnly(True)
+        preview_edit.setLineWrapMode(QTextEdit.NoWrap)
+        preview_edit.setPlainText(text)
+        layout.addWidget(preview_edit, 1)
+
+        buttons = QHBoxLayout()
+        export_csv_btn = QPushButton("Exportar CSV mapeado")
+        export_csv_btn.clicked.connect(lambda: self._export_mapped_data("csv"))
+        buttons.addWidget(export_csv_btn)
+
+        export_excel_btn = QPushButton("Exportar Excel mapeado")
+        export_excel_btn.clicked.connect(lambda: self._export_mapped_data("excel"))
+        buttons.addWidget(export_excel_btn)
+
+        buttons.addStretch()
+        close_btn = QPushButton("Fechar")
+        close_btn.clicked.connect(dialog.accept)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        dialog.exec()
 
     def _build_sql_example(self, selection: MappingSelection) -> str:
         cols: List[str] = []

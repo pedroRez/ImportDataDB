@@ -106,6 +106,9 @@ class ExcelSelectionDialog(QDialog):
 
         layout.addWidget(footer)
 
+        self.header_checkbox.setChecked(False)
+        self.header_checkbox.hide()
+
     def _fit_to_available_screen(self) -> None:
         screen = self.screen() or QApplication.primaryScreen()
         if not screen:
