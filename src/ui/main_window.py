@@ -1173,12 +1173,36 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(panel)
         content_layout.setSpacing(12)
 
+        content_layout.addWidget(self._build_primary_key_section())
         content_layout.addWidget(self._build_mapping_section())
         content_layout.addWidget(self._build_defaults_and_fk_section())
         content_layout.addWidget(self._build_operations_section())
         content_layout.addStretch()
 
         return panel
+
+    def _build_primary_key_section(self) -> QWidget:
+        section = QGroupBox("Chave primaria / codigo")
+        section_layout = QVBoxLayout(section)
+        section_layout.setSpacing(8)
+
+        self.pk_summary_label = QLabel("Selecione uma tabela para identificar a chave primaria.")
+        self.pk_summary_label.setWordWrap(True)
+        section_layout.addWidget(self.pk_summary_label)
+
+        self.pk_auto_checkbox = QCheckBox("Banco gera automaticamente esta chave no INSERT")
+        self.pk_auto_checkbox.setEnabled(False)
+        self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
+        section_layout.addWidget(self.pk_auto_checkbox)
+
+        self.pk_hint_label = QLabel(
+            "Quando esta opcao estiver marcada, a coluna de chave nao sera enviada para o banco."
+        )
+        self.pk_hint_label.setWordWrap(True)
+        self.pk_hint_label.setProperty("role", "muted")
+        section_layout.addWidget(self.pk_hint_label)
+
+        return section
 
     def _build_mapping_section(self) -> QWidget:
         section = QWidget()
@@ -1208,11 +1232,6 @@ class MainWindow(QMainWindow):
         self.required_columns_label = QLabel("Campos obrigatorios: --")
         self.required_columns_label.setWordWrap(True)
         section_layout.addWidget(self.required_columns_label)
-
-        self.pk_auto_checkbox = QCheckBox("PK gerada pelo banco (auto-incremento)")
-        self.pk_auto_checkbox.setEnabled(False)
-        self.pk_auto_checkbox.toggled.connect(self._on_pk_auto_toggled)
-        section_layout.addWidget(self.pk_auto_checkbox)
 
         return section
 
@@ -2220,6 +2239,70 @@ class MainWindow(QMainWindow):
             df[col] = df[col].map(self._trim_cell_whitespace)
         return df
 
+    def _refresh_table_column_options(self) -> None:
+        if not getattr(self, "table_columns_list", None):
+            return
+        self.table_columns_list.clear()
+        blocked: set[str] = set()
+        if self.pk_auto_checkbox.isChecked() and self.primary_key_column:
+            blocked.add(self.primary_key_column)
+        for col in self.table_columns:
+            if col.name not in blocked:
+                self.table_columns_list.addItem(col.name)
+
+    def _remove_table_column_references(self, column_name: str) -> None:
+        for row in range(self.mapping_table.rowCount() - 1, -1, -1):
+            table_item = self.mapping_table.item(row, 1)
+            if table_item and table_item.text() == column_name:
+                self.mapping_table.removeRow(row)
+        for row in range(self.defaults_table.rowCount() - 1, -1, -1):
+            col_item = self.defaults_table.item(row, 0)
+            if col_item and col_item.text() == column_name:
+                self.defaults_table.removeRow(row)
+        for row in range(self.fk_table.rowCount() - 1, -1, -1):
+            target_item = self.fk_table.item(row, 0)
+            if target_item and target_item.text() == column_name:
+                self.fk_table.removeRow(row)
+
+    def _refresh_primary_key_hint(self) -> None:
+        if not getattr(self, "pk_summary_label", None):
+            return
+        if not self.table_columns:
+            self.pk_summary_label.setText("Selecione uma tabela para identificar a chave primaria.")
+            self.pk_hint_label.setText(
+                "Quando esta opcao estiver marcada, a coluna de chave nao sera enviada para o banco."
+            )
+            return
+        if not self.primary_key_column:
+            self.pk_summary_label.setText("Nenhuma chave primaria foi detectada na tabela selecionada.")
+            self.pk_hint_label.setText("O mapeamento deve preencher os campos obrigatorios informados pelo banco.")
+            return
+
+        pk_info = self._find_column_info(self.primary_key_column)
+        pk_type = f" ({pk_info.type})" if pk_info else ""
+        self.pk_summary_label.setText(f"Chave detectada: {self.primary_key_column}{pk_type}")
+
+        mapped = self.primary_key_column in self._current_mapped_columns()
+        defaulted = self.primary_key_column in self._current_default_columns()
+        fk_filled = self.primary_key_column in self._current_fk_columns()
+        if self.pk_auto_checkbox.isChecked():
+            self.pk_hint_label.setText(
+                f"A coluna {self.primary_key_column} nao sera enviada no INSERT; o banco deve gerar o valor."
+            )
+        elif mapped or defaulted or fk_filled:
+            origin = "mapeamento"
+            if defaulted:
+                origin = "valor padrao"
+            elif fk_filled:
+                origin = "relacionamento FK"
+            self.pk_hint_label.setText(
+                f"A coluna {self.primary_key_column} sera preenchida por {origin}."
+            )
+        else:
+            self.pk_hint_label.setText(
+                f"Mapeie {self.primary_key_column}, defina um valor padrao ou marque que o banco gera automaticamente."
+            )
+
     def _current_fk_columns(self) -> set[str]:
         cols: set[str] = set()
         for row in range(self.fk_table.rowCount()):
@@ -2607,6 +2690,7 @@ class MainWindow(QMainWindow):
         if not self.table_columns:
             self.required_columns_label.setText("Campos obrigatorios: --")
             self.required_columns_label.setToolTip("")
+            self._refresh_primary_key_hint()
             return
         required = [
             col.name
@@ -2620,6 +2704,7 @@ class MainWindow(QMainWindow):
         if not required:
             self.required_columns_label.setText("Campos obrigatorios: nenhum")
             self.required_columns_label.setToolTip("")
+            self._refresh_primary_key_hint()
             return
         required_brief = self._compact_columns_text(required)
         tooltip_lines = [f"Obrigatorios ({len(required)}): {', '.join(required)}"]
@@ -2634,6 +2719,7 @@ class MainWindow(QMainWindow):
             text = f"Obrigatorios ({len(required)}): {required_brief} | Todos atendidos"
         self.required_columns_label.setText(text)
         self.required_columns_label.setToolTip("\n".join(tooltip_lines))
+        self._refresh_primary_key_hint()
 
     def _clear_pre_validation_state(self) -> None:
         self._pre_validation_remove_duplicates = False
@@ -2768,19 +2854,23 @@ class MainWindow(QMainWindow):
             if not col.nullable:
                 label += " [Obrigatorio]"
             self.columns_list.addItem(label)
-            self.table_columns_list.addItem(col.name)
             self.join_combo.addItem(col.name)
         self._set_combo_tooltip(self.join_combo)
         if self.primary_key_column:
+            self.pk_auto_checkbox.blockSignals(True)
             self.pk_auto_checkbox.setEnabled(True)
             self.pk_auto_checkbox.setChecked(False)
+            self.pk_auto_checkbox.blockSignals(False)
             self.pk_auto_checkbox.setText(
-                f"PK {self.primary_key_column} gerada pelo banco (auto-incremento)"
+                f"Banco gera automaticamente {self.primary_key_column} no INSERT"
             )
         else:
+            self.pk_auto_checkbox.blockSignals(True)
             self.pk_auto_checkbox.setEnabled(False)
             self.pk_auto_checkbox.setChecked(False)
-            self.pk_auto_checkbox.setText("PK gerada pelo banco (auto-incremento)")
+            self.pk_auto_checkbox.blockSignals(False)
+            self.pk_auto_checkbox.setText("Banco gera automaticamente esta chave no INSERT")
+        self._refresh_table_column_options()
         self._refresh_default_column_options()
         self._refresh_fk_target_options()
         self._refresh_required_columns_hint()
@@ -2819,10 +2909,8 @@ class MainWindow(QMainWindow):
 
     def _on_pk_auto_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if checked and self.primary_key_column:
-            for row in range(self.defaults_table.rowCount() - 1, -1, -1):
-                col_item = self.defaults_table.item(row, 0)
-                if col_item and col_item.text() == self.primary_key_column:
-                    self.defaults_table.removeRow(row)
+            self._remove_table_column_references(self.primary_key_column)
+        self._refresh_table_column_options()
         self._refresh_default_column_options()
         self._refresh_required_columns_hint()
 
@@ -2863,6 +2951,16 @@ class MainWindow(QMainWindow):
         if not self.update_radio.isChecked():
             missing_required = self._missing_required_columns(mapping, defaults, autogenerate_pk, fk_lookups)
             if missing_required:
+                if self.primary_key_column and self.primary_key_column in missing_required:
+                    QMessageBox.warning(
+                        self,
+                        "Chave primaria",
+                        (
+                            f"A chave primaria/codigo '{self.primary_key_column}' e obrigatoria. "
+                            "Mapeie essa coluna, defina um valor padrao ou marque que o banco gera automaticamente."
+                        ),
+                    )
+                    return None
                 QMessageBox.warning(
                     self,
                     "Mapeamento",
@@ -3103,6 +3201,11 @@ class MainWindow(QMainWindow):
                 text.append("Valores padrão aplicados:")
                 for col, value in selection.default_values.items():
                     text.append(f"- {col}: {value}")
+            if selection.autogenerate_pk and selection.primary_key:
+                text.append("")
+                text.append(
+                    f"Chave primaria/codigo: {selection.primary_key} nao sera enviada no INSERT; o banco deve gerar o valor."
+                )
             if selection.similarity_replacements:
                 text.append("")
                 text.append("Padronização de texto:")
